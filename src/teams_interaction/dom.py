@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from playwright.async_api import Page, Locator
+from playwright.async_api import Locator, Page
 
 from teams_interaction import selectors as sel
 from teams_interaction.types import ChannelMessage
@@ -121,18 +121,16 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
     )
 
 
-async def _stable_id_for_item(
-    item: Locator, item_sel: str, index: int, text: str, author: str | None
-) -> str:
+async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: str, author: str | None) -> str:
     try:
         mid = await item.get_attribute("data-mid")
         if mid:
             return f"mid:{mid}"
     except Exception:
         pass
-    h = hashlib.sha256(
-        f"{item_sel}|{index}|{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")
-    ).hexdigest()[:24]
+    h = hashlib.sha256(f"{item_sel}|{index}|{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
+        :24
+    ]
     return f"hash:{h}"
 
 

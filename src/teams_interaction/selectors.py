@@ -14,7 +14,7 @@ MESSAGE_LIST_REGION = [
 # Individual message row / card roots (tried in order per candidate node).
 MESSAGE_ITEM = [
     '[data-tid="chat-pane-item"]',
-    'div[data-mid]',  # message id attribute seen in some builds
+    "div[data-mid]",  # message id attribute seen in some builds
     '[data-testid="message-wrapper"]',
 ]
 
