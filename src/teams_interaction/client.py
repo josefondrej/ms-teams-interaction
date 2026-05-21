@@ -90,6 +90,11 @@ class TeamsClient:
         # Pages opened by *this* client instance.  Used by _acquire_page to avoid
         # stealing tabs that belong to a sibling CLI process sharing the browser.
         self._my_pages: set[Any] = set()
+        # Persistent page kept open for send_message so we never need to
+        # open-navigate-close a fresh tab on every call (avoids the new-window
+        # side-effect that the window.open fallback can produce in Edge).
+        self._send_page: Any = None
+        self._send_page_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -233,6 +238,12 @@ class TeamsClient:
             if self._tasks:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
+            if self._send_page:
+                try:
+                    await self._send_page.close()
+                except Exception:
+                    pass
+                self._send_page = None
             if self._context:
                 try:
                     await self._context.close()
@@ -276,7 +287,11 @@ class TeamsClient:
     async def send_message(self, channel_url: str | None, text: str, *, channel_name: str | None = None) -> None:
         """Open a channel, type *text* into the compose box, and send it.
 
-        A fresh page is opened for the operation and closed afterwards.
+        Uses a persistent background tab that is created on the first call and
+        reused for all subsequent sends.  This avoids opening a new browser
+        window every time (the ``window.open`` fallback in
+        :meth:`_new_page` can trigger a new Edge/Chrome window when called
+        repeatedly from a persistent profile context).
 
         Args:
             channel_url: Full Teams URL to navigate to.  Falls back to the
@@ -291,14 +306,41 @@ class TeamsClient:
         """
         await self._require_context()
         url = self._resolve_url(channel_url)
-        page = await self._new_page()
-        try:
-            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+
+        async with self._send_page_lock:
+            page = await self._get_or_create_send_page(url)
             if channel_name:
                 await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
             await send_plain_text(page, text)
-        finally:
-            await page.close()
+
+    async def _get_or_create_send_page(self, url: str) -> Any:
+        """Return the reusable send page, creating and navigating it if needed.
+
+        If the cached send page is still open and already on a Teams URL, it is
+        returned as-is (no extra navigation).  If it has been closed or was
+        never created, a fresh page is opened and navigated to *url*.
+
+        Args:
+            url: Teams URL to navigate to when a new page must be created.
+
+        Returns:
+            A :class:`playwright.async_api.Page` ready for Teams interaction.
+        """
+        if self._send_page and not self._send_page.is_closed():
+            # Already on Teams — no navigation needed.
+            if "teams.microsoft.com" in self._send_page.url:
+                log.debug("_get_or_create_send_page: reusing existing send page")
+                return self._send_page
+            # The page drifted to a non-Teams URL; re-navigate it.
+            log.info("_get_or_create_send_page: send page drifted, re-navigating to %s", url)
+            await goto_channel(self._send_page, url, timeout_ms=self._nav_timeout_ms)
+            return self._send_page
+
+        log.info("_get_or_create_send_page: creating persistent send page")
+        page = await self._new_page()
+        await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+        self._send_page = page
+        return page
 
     async def inspect_channel(
         self,
