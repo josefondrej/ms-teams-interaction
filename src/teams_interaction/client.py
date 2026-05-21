@@ -98,9 +98,9 @@ class TeamsClient:
     @staticmethod
     def _free_port() -> int:
         """Return an ephemeral free TCP port on localhost."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
 
     def _port_file(self) -> Path:
         """Return the path of the file used to advertise the browser's CDP port.
@@ -228,8 +228,8 @@ class TeamsClient:
         same slot.
         """
         async with self._run_guard:
-            for t in self._tasks:
-                t.cancel()
+            for task in self._tasks:
+                task.cancel()
             if self._tasks:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
@@ -436,10 +436,10 @@ class TeamsClient:
             initial_msgs = await scrape_top_level_messages(page)
         except Exception:
             initial_msgs = []
-        for m in initial_msgs:
-            seen.add(m.stable_id)
+        for msg in initial_msgs:
+            seen.add(msg.stable_id)
             if include_existing:
-                out = on_message(m)
+                out = on_message(msg)
                 if asyncio.iscoroutine(out):
                     await out
         log.info("watch: primed with %d existing message id(s)", len(seen))
@@ -468,12 +468,12 @@ class TeamsClient:
                 msgs = await scrape_top_level_messages(page)
                 log.debug("watch: poll #%d – scraped %d messages", poll_count, len(msgs))
                 new_count = 0
-                for m in msgs:
-                    if m.stable_id in seen:
+                for msg in msgs:
+                    if msg.stable_id in seen:
                         continue
-                    seen.add(m.stable_id)
+                    seen.add(msg.stable_id)
                     new_count += 1
-                    out = on_message(m)
+                    out = on_message(msg)
                     if asyncio.iscoroutine(out):
                         await out
                 if new_count:
@@ -504,12 +504,12 @@ class TeamsClient:
         if not self._context:
             return
 
-        all_pages = [p for p in self._context.pages if not p.is_closed()]
+        all_pages = [page for page in self._context.pages if not page.is_closed()]
         if not all_pages:
             return
 
-        teams_pages = [p for p in all_pages if "teams.microsoft.com" in p.url]
-        blank_pages = [p for p in all_pages if p.url in self._BLANK_URLS]
+        teams_pages = [page for page in all_pages if "teams.microsoft.com" in page.url]
+        blank_pages = [page for page in all_pages if page.url in self._BLANK_URLS]
 
         # Decide which single tab to keep.
         if teams_pages:
@@ -525,15 +525,15 @@ class TeamsClient:
 
         # Close everything else.
         closed = 0
-        for p in all_pages:
-            if p is keeper:
+        for page in all_pages:
+            if page is keeper:
                 continue
             try:
-                await p.close()
+                await page.close()
                 closed += 1
-                log.debug("_cleanup_startup_tabs: closed tab url=%r", p.url)
+                log.debug("_cleanup_startup_tabs: closed tab url=%r", page.url)
             except Exception as exc:
-                log.debug("_cleanup_startup_tabs: could not close tab url=%r: %s", p.url, exc)
+                log.debug("_cleanup_startup_tabs: could not close tab url=%r: %s", page.url, exc)
 
         log.info(
             "_cleanup_startup_tabs: kept url=%r, closed %d other tab(s)",
@@ -555,30 +555,30 @@ class TeamsClient:
         is set to ``[True]`` when the caller should close the page after use,
         and ``[False]`` when an already-open Teams page was reused.
         """
-        pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
+        pages = [page for page in self._context.pages if not page.is_closed()]  # type: ignore[union-attr]
 
         # Only consider pages that *this* client opened — never steal a tab
         # from another process that shares the same browser context via CDP.
-        my_pages = [p for p in pages if p in self._my_pages]
+        my_pages = [page for page in pages if page in self._my_pages]
 
-        for p in my_pages:
-            if "teams.microsoft.com" in p.url:
-                log.info("_acquire_page: reusing existing Teams page (url=%s)", p.url)
+        for page in my_pages:
+            if "teams.microsoft.com" in page.url:
+                log.info("_acquire_page: reusing existing Teams page (url=%s)", page.url)
                 owns_page_out[0] = False
-                return p
+                return page
 
-        for p in my_pages:
-            if p.url in self._BLANK_URLS:
+        for page in my_pages:
+            if page.url in self._BLANK_URLS:
                 log.info("_acquire_page: reusing blank tab, navigating to %s", url)
                 owns_page_out[0] = True
-                await goto_channel(p, url, timeout_ms=self._nav_timeout_ms)
-                return p
+                await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+                return page
 
         log.info("_acquire_page: opening new page, url=%s", url)
-        p = await self._new_page()
+        page = await self._new_page()
         owns_page_out[0] = True
-        await goto_channel(p, url, timeout_ms=self._nav_timeout_ms)
-        return p
+        await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+        return page
 
     async def _new_page(self) -> Any:
         """Open a new browser tab, with a ``window.open`` fallback.
@@ -595,9 +595,9 @@ class TeamsClient:
             A :class:`playwright.async_api.Page` for the new tab.
         """
         try:
-            p = await self._context.new_page()  # type: ignore[union-attr]
-            self._my_pages.add(p)
-            return p
+            page = await self._context.new_page()  # type: ignore[union-attr]
+            self._my_pages.add(page)
+            return page
         except Exception as exc:
             log.warning("_new_page: context.new_page() failed (%s) – using window.open fallback", exc)
             return await self._open_page_via_js()
@@ -615,15 +615,15 @@ class TeamsClient:
         Raises:
             RuntimeError: If there are no open pages to trigger ``window.open`` from.
         """
-        pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
+        pages = [page for page in self._context.pages if not page.is_closed()]  # type: ignore[union-attr]
         if not pages:
             raise RuntimeError("_open_page_via_js: no open pages available to trigger window.open")
         async with self._context.expect_page() as page_info:  # type: ignore[union-attr]
             await pages[0].evaluate("() => window.open('about:blank', '_blank')")
-        p = await page_info.value
-        self._my_pages.add(p)
+        page = await page_info.value
+        self._my_pages.add(page)
         log.info("_open_page_via_js: opened new tab via window.open")
-        return p
+        return page
 
     async def _require_context(self) -> None:
         """Raise ``RuntimeError`` if the browser context is not initialised.

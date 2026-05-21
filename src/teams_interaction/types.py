@@ -31,10 +31,10 @@ class ChannelRef:
             ValueError: If *url* does not start with
                 ``https://teams.microsoft.com``.
         """
-        u = url.strip()
-        if not u.startswith("https://teams.microsoft.com"):
+        stripped_url = url.strip()
+        if not stripped_url.startswith("https://teams.microsoft.com"):
             raise ValueError("Expected a teams.microsoft.com URL")
-        return ChannelRef(url=u)
+        return ChannelRef(url=stripped_url)
 
 
 @dataclass

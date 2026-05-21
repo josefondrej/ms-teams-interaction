@@ -149,10 +149,10 @@ def watch(
         client = TeamsClient(persistent=not no_persistent)
         await client.start()
 
-        async def on_message(m: ChannelMessage) -> None:
-            who = m.author or "?"
+        async def on_message(message: ChannelMessage) -> None:
+            who = message.author or "?"
             ts = datetime.now().strftime("%H:%M:%S")
-            body = m.text.replace("\n", " ").strip()
+            body = message.text.replace("\n", " ").strip()
             author_styled = typer.style(who, fg=typer.colors.CYAN, bold=True)
             ts_styled = typer.style(f"[{ts}]", fg=typer.colors.BRIGHT_BLACK)
             typer.echo(f"{ts_styled} {author_styled}: {body}")
@@ -249,7 +249,11 @@ def chat(
 
         # Retrieve the Teams page that open_channel used (reused or newly opened)
         page = next(
-            (p for p in reversed(client._context.pages) if not p.is_closed() and "teams.microsoft.com" in p.url),
+            (
+                page
+                for page in reversed(client._context.pages)
+                if not page.is_closed() and "teams.microsoft.com" in page.url
+            ),
             client._context.pages[-1],
         )
 
@@ -302,15 +306,15 @@ def chat(
                 [stdin_task, send_task],
                 return_when=asyncio.FIRST_EXCEPTION,
             )
-            for t in done:
-                exc = t.exception() if not t.cancelled() else None
+            for completed_task in done:
+                exc = completed_task.exception() if not completed_task.cancelled() else None
                 if exc and not isinstance(exc, SystemExit):
                     log.error("chat task error: %s", exc, exc_info=exc)
         except asyncio.CancelledError:
             pass
         finally:
-            for t in (stdin_task, send_task):
-                t.cancel()
+            for task in (stdin_task, send_task):
+                task.cancel()
             await asyncio.gather(stdin_task, send_task, return_exceptions=True)
             await client.close()
 

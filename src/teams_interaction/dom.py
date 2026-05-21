@@ -133,17 +133,17 @@ def _clean_message_text(text: str, author: str | None) -> str:
     if author:
         escaped = re.escape(author)
         # "…truncated… by Author Author real text"
-        m = re.search(
+        match = re.search(
             r"\.{3}\s+by\s+" + escaped + r"\s+" + escaped + r"\s+([\s\S]+)",
             text,
         )
-        if m:
-            return m.group(1).strip()
+        if match:
+            return match.group(1).strip()
 
         # "…truncated… by Author\n real text" (author not repeated)
-        m = re.search(r"\.{3}\s+by\s+" + escaped + r"[\s,]+([\s\S]+)", text)
-        if m:
-            candidate = m.group(1).strip()
+        match = re.search(r"\.{3}\s+by\s+" + escaped + r"[\s,]+([\s\S]+)", text)
+        if match:
+            candidate = match.group(1).strip()
             # strip leading author name if it snuck in
             if candidate.startswith(author):
                 candidate = candidate[len(author) :].lstrip()
@@ -168,14 +168,14 @@ async def active_channel_name(page: Page) -> str | None:
     Returns:
         The channel title string, or ``None`` if it could not be determined.
     """
-    for s in sel.ACTIVE_CHANNEL_TITLE:
-        nodes = page.locator(s)
+    for selector in sel.ACTIVE_CHANNEL_TITLE:
+        nodes = page.locator(selector)
         try:
-            n = await nodes.count()
+            node_count = await nodes.count()
         except Exception:
             continue
-        for i in range(min(n, 4)):
-            node = nodes.nth(i)
+        for index in range(min(node_count, 4)):
+            node = nodes.nth(index)
             if not await _visible(node, timeout_ms=180):
                 continue
             try:
@@ -211,14 +211,14 @@ async def _wait_for_nav_ready(
     deadline = time.monotonic() + timeout_ms / 1000.0
     while time.monotonic() < deadline:
         count = 0
-        for s in sel.CHANNEL_NAV_ITEM:
+        for selector in sel.CHANNEL_NAV_ITEM:
             try:
-                nodes = page.locator(s)
-                n = await nodes.count()
+                nodes = page.locator(selector)
+                node_count = await nodes.count()
             except Exception:
                 continue
-            for i in range(min(n, 20)):
-                if await _visible(nodes.nth(i), timeout_ms=80):
+            for index in range(min(node_count, 20)):
+                if await _visible(nodes.nth(index), timeout_ms=80):
                     count += 1
                     if count >= min_items:
                         log.debug("_wait_for_nav_ready: nav ready (%d visible items)", count)
@@ -394,15 +394,15 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
     best_loc: Locator | None = None
     best_text: str = ""
 
-    for s in sel.CHANNEL_NAV_ITEM:
-        matches = page.locator(s)
+    for selector in sel.CHANNEL_NAV_ITEM:
+        matches = page.locator(selector)
         try:
-            n = await matches.count()
+            node_count = await matches.count()
         except Exception:
             continue
-        log.debug("_find_channel_nav_item: selector=%r found %d nodes", s, n)
-        for i in range(min(n, 250)):
-            candidate = matches.nth(i)
+        log.debug("_find_channel_nav_item: selector=%r found %d nodes", selector, node_count)
+        for index in range(min(node_count, 250)):
+            candidate = matches.nth(index)
             if not await _visible(candidate, timeout_ms=120):
                 continue
 
@@ -424,7 +424,7 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
             except Exception:
                 data_tid = ""
 
-            name_blob = "\n".join(v for v in (display_text, aria_label, title_text) if v)
+            name_blob = "\n".join(value for value in (display_text, aria_label, title_text) if value)
             raw = name_blob or await _candidate_text(candidate)
             if not raw:
                 continue
@@ -433,15 +433,17 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
             lowered_display = display_text.casefold()
             # Ignore elements that are clearly profile/avatar affordances.
             if any(tag in lowered_meta for tag in ("avatar", "profile", "contact-card", "contact card")):
-                log.debug("  candidate ignored (profile/avatar meta) sel=%r i=%d meta=%r", s, i, lowered_meta[:80])
+                log.debug(
+                    "  candidate ignored (profile/avatar meta) sel=%r i=%d meta=%r", selector, index, lowered_meta[:80]
+                )
                 continue
             # By default avoid matching self-profile entries unless explicitly requested.
             if "(you)" in lowered_display and not wants_you_suffix:
-                log.debug("  candidate ignored (self entry) sel=%r i=%d text=%r", s, i, display_text[:80])
+                log.debug("  candidate ignored (self entry) sel=%r i=%d text=%r", selector, index, display_text[:80])
                 continue
             lowered_raw = raw.casefold()
             if "(you)" in lowered_raw and not wants_you_suffix:
-                log.debug("  candidate ignored (self raw) sel=%r i=%d raw=%r", s, i, raw[:80])
+                log.debug("  candidate ignored (self raw) sel=%r i=%d raw=%r", selector, index, raw[:80])
                 continue
 
             norm = _norm_text(raw)
@@ -458,7 +460,7 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
             else:
                 continue
 
-            log.debug("  candidate score=%d sel=%r i=%d text=%r", score, s, i, raw[:100])
+            log.debug("  candidate score=%d sel=%r i=%d text=%r", score, selector, index, raw[:100])
             if score > best_score:
                 best_score = score
                 best_loc = candidate
@@ -500,12 +502,12 @@ async def _candidate_text(node: Locator) -> str:
         pass
     for attr in ("aria-label", "title", "data-tid"):
         try:
-            v = await node.get_attribute(attr)
+            attr_value = await node.get_attribute(attr)
         except Exception:
-            v = None
-        if v:
-            values.append(v)
-    return "\n".join(v.strip() for v in values if v and v.strip())
+            attr_value = None
+        if attr_value:
+            values.append(attr_value)
+    return "\n".join(value.strip() for value in values if value and value.strip())
 
 
 async def _active_channel_nav_text(page: Page) -> str | None:
@@ -521,15 +523,15 @@ async def _active_channel_nav_text(page: Page) -> str | None:
         The visible text of the selected nav entry, or ``None`` if not found.
     """
     attrs = ["aria-selected='true'", "aria-current='page'", "data-tid*='active' i"]
-    for s in sel.CHANNEL_NAV_ITEM:
+    for selector in sel.CHANNEL_NAV_ITEM:
         for attr in attrs:
-            loc = page.locator(f"{s}[{attr}]")
+            loc = page.locator(f"{selector}[{attr}]")
             try:
-                n = await loc.count()
+                node_count = await loc.count()
             except Exception:
                 continue
-            for i in range(min(n, 5)):
-                item = loc.nth(i)
+            for index in range(min(node_count, 5)):
+                item = loc.nth(index)
                 if not await _visible(item, timeout_ms=120):
                     continue
                 try:
@@ -697,7 +699,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
 
     out: list[ChannelMessage] = []
     seen: set[str] = set()
-    for i, raw in enumerate(result["messages"]):
+    for msg_index, raw in enumerate(result["messages"]):
         text = (raw.get("text") or "").strip()
         author = raw.get("author") or None
         mid = raw.get("mid") or None
@@ -713,8 +715,10 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
         if mid:
             stable = f"mid:{mid}"
         else:
-            h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
-            stable = f"hash:{h}"
+            content_hash = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
+                :24
+            ]
+            stable = f"hash:{content_hash}"
 
         if stable in seen:
             continue
@@ -724,7 +728,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
                 stable_id=stable,
                 text=text,
                 author=author,
-                raw={"item_selector": item_sel, "index": i, "js": True},
+                raw={"item_selector": item_sel, "index": msg_index, "js": True},
             )
         )
 
@@ -760,16 +764,16 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
 
     # --- Slow fallback path (original Playwright-per-element approach) ---
     region_sel = None
-    for s in sel.MESSAGE_LIST_REGION:
-        loc = page.locator(s)
+    for selector in sel.MESSAGE_LIST_REGION:
+        loc = page.locator(selector)
         try:
             if await loc.count() == 0:
                 continue
         except Exception:
             continue
         if await _visible(loc.first, timeout_ms=200):
-            region_sel = s
-            log.debug("scrape: message list region matched by %r", s)
+            region_sel = selector
+            log.debug("scrape: message list region matched by %r", selector)
             break
     if not region_sel:
         log.warning("scrape: no message list region found via any selector – falling back to body")
@@ -781,17 +785,17 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
     for item_sel in sel.MESSAGE_ITEM:
         items = region.locator(item_sel)
         try:
-            n = await items.count()
+            item_count = await items.count()
         except Exception:
             continue
-        log.debug("scrape: item selector=%r count=%d", item_sel, n)
-        if n == 0:
+        log.debug("scrape: item selector=%r count=%d", item_sel, item_count)
+        if item_count == 0:
             continue
-        for i in range(min(n, max_items)):
-            item = items.nth(i)
+        for index in range(min(item_count, max_items)):
+            item = items.nth(index)
             if not await _visible(item, timeout_ms=200):
                 continue
-            msg = await _parse_message_item(item, item_sel, i)
+            msg = await _parse_message_item(item, item_sel, index)
             if msg and msg.text.strip():
                 messages.append(msg)
         if messages:
@@ -806,11 +810,11 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
     # Dedupe by stable_id while preserving order
     seen: set[str] = set()
     out: list[ChannelMessage] = []
-    for m in messages:
-        if m.stable_id in seen:
+    for message in messages:
+        if message.stable_id in seen:
             continue
-        seen.add(m.stable_id)
-        out.append(m)
+        seen.add(message.stable_id)
+        out.append(message)
 
     log.info("scrape: returning %d unique messages (region=%r)", len(out), region_sel)
     return out
@@ -868,8 +872,8 @@ async def inspect_message_dom(page: Page, max_samples: int = 5) -> dict[str, Any
             count = -1
         samples: list[str] = []
         if count > 0:
-            for i in range(min(count, max_samples)):
-                node = loc.nth(i)
+            for index in range(min(count, max_samples)):
+                node = loc.nth(index)
                 if not await _visible(node, timeout_ms=100):
                     continue
                 try:
@@ -888,8 +892,8 @@ async def inspect_message_dom(page: Page, max_samples: int = 5) -> dict[str, Any
             count = -1
         samples: list[str] = []
         if count > 0:
-            for i in range(min(count, max_samples)):
-                node = loc.nth(i)
+            for index in range(min(count, max_samples)):
+                node = loc.nth(index)
                 if not await _visible(node, timeout_ms=100):
                     continue
                 try:
@@ -927,16 +931,16 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
     for body_sel in sel.BODY:
         nodes = page.locator(body_sel)
         try:
-            n = await nodes.count()
+            node_count = await nodes.count()
         except Exception:
             continue
-        if n == 0:
+        if node_count == 0:
             continue
-        log.debug("fallback: body selector=%r count=%d", body_sel, n)
-        for i in range(min(n, max_items * 2)):
+        log.debug("fallback: body selector=%r count=%d", body_sel, node_count)
+        for index in range(min(node_count, max_items * 2)):
             if len(out) >= max_items:
                 return out
-            node = nodes.nth(i)
+            node = nodes.nth(index)
             if not await _visible(node, timeout_ms=120):
                 continue
             try:
@@ -946,10 +950,10 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             if not raw or len(raw) < 6:
                 continue
             if _looks_like_transcript_blob(raw):
-                log.debug("fallback: skipping transcript-like body node selector=%r index=%d", body_sel, i)
+                log.debug("fallback: skipping transcript-like body node selector=%r index=%d", body_sel, index)
                 continue
             if _is_date_separator(raw, None):
-                log.debug("fallback: skipping date-separator %r selector=%r index=%d", raw, body_sel, i)
+                log.debug("fallback: skipping date-separator %r selector=%r index=%d", raw, body_sel, index)
                 continue
             norm = _norm_text(raw)
             if norm in seen_text:
@@ -976,7 +980,7 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
                     stable_id=f"{stable_prefix}:{stable_value}",
                     text=raw,
                     author=None,
-                    raw={"fallback": True, "body_selector": body_sel, "index": i},
+                    raw={"fallback": True, "body_selector": body_sel, "index": index},
                 )
             )
     log.info("fallback: extracted %d message body node(s)", len(out))
@@ -1003,8 +1007,8 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
     text_parts: list[str] = []
     author: str | None = None
 
-    for a in sel.AUTHOR:
-        al = item.locator(a)
+    for author_sel in sel.AUTHOR:
+        al = item.locator(author_sel)
         try:
             if await al.count() == 0:
                 continue
@@ -1012,9 +1016,9 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
             continue
         if await _visible(al.first, timeout_ms=150):
             try:
-                t = (await al.inner_text()).strip()
-                if t:
-                    author = t
+                author_text = (await al.inner_text()).strip()
+                if author_text:
+                    author = author_text
                     break
             except Exception:
                 pass
@@ -1030,14 +1034,14 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
         except Exception:
             pass
 
-    for b in sel.BODY:
-        bl = item.locator(b)
+    for body_sel in sel.BODY:
+        bl = item.locator(body_sel)
         try:
             cnt = await bl.count()
         except Exception:
             continue
-        for j in range(min(cnt, 3)):
-            cell = bl.nth(j)
+        for body_index in range(min(cnt, 3)):
+            cell = bl.nth(body_index)
             if await _visible(cell, timeout_ms=100):
                 try:
                     raw = (await cell.inner_text()).strip()
@@ -1121,8 +1125,8 @@ async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: st
                 return f"mid:{mid}"
     except Exception:
         pass
-    h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
-    return f"hash:{h}"
+    content_hash = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
+    return f"hash:{content_hash}"
 
 
 async def send_plain_text(page: Page, text: str) -> None:
@@ -1141,8 +1145,8 @@ async def send_plain_text(page: Page, text: str) -> None:
         RuntimeError: If no compose textbox can be found.
     """
     box: Locator | None = None
-    for s in sel.COMPOSE:
-        loc = page.locator(s).first
+    for selector in sel.COMPOSE:
+        loc = page.locator(selector).first
         if await _visible(loc, timeout_ms=600):
             box = loc
             break
@@ -1154,8 +1158,8 @@ async def send_plain_text(page: Page, text: str) -> None:
     await page.keyboard.insert_text(text)
 
     clicked = False
-    for s in sel.SEND_BUTTON:
-        btn = page.locator(s).first
+    for selector in sel.SEND_BUTTON:
+        btn = page.locator(selector).first
         if await _visible(btn, timeout_ms=400):
             await btn.click()
             clicked = True
@@ -1177,9 +1181,9 @@ def normalize_teams_url(url: str) -> str:
         ValueError: If *url* does not contain ``teams.microsoft.com`` or does
             not start with ``http``.
     """
-    u = url.strip()
-    if "teams.microsoft.com" not in u:
+    stripped_url = url.strip()
+    if "teams.microsoft.com" not in stripped_url:
         raise ValueError("channel url must be a teams.microsoft.com link")
-    if not u.startswith("http"):
+    if not stripped_url.startswith("http"):
         raise ValueError("channel url must start with https://")
-    return u
+    return stripped_url
