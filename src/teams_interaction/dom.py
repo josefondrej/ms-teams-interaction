@@ -6,6 +6,37 @@ import re
 import time
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# Teams date-divider detection
+# ---------------------------------------------------------------------------
+
+_DATE_SEP_RE = re.compile(
+    r"^(?:"
+    r"today|yesterday|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|wed|thu|fri|sat|sun|"
+    r"\d{1,2}\s+\w+\s+\d{4}|"       # "21 May 2026"
+    r"\w+\s+\d{1,2},?\s+\d{4}|"     # "May 21, 2026"
+    r"\d{1,2}/\d{1,2}/\d{2,4}|"     # "5/21/26"
+    r"\d{4}-\d{2}-\d{2}"            # "2026-05-21"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_date_separator(text: str, author: str | None) -> bool:
+    """Return True when *text* looks like a Teams date-divider row (e.g. 'Today').
+
+    These DOM elements have no author and contain only a short date string; they
+    are not real chat messages and should be dropped from the scrape output.
+    """
+    if author:
+        return False
+    stripped = text.strip()
+    if "\n" in stripped or len(stripped) > 40:
+        return False
+    return bool(_DATE_SEP_RE.match(stripped))
+
 from playwright.async_api import Locator, Page
 
 from teams_interaction import selectors as sel
@@ -25,8 +56,8 @@ async def _visible(loc: Locator, timeout_ms: float = 500) -> bool:
 async def goto_channel(page: Page, url: str) -> None:
     log.info("goto_channel: navigating to %s", url)
     await page.goto(url, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1500)
     log.debug("goto_channel: page loaded (url=%s)", page.url)
+
 
 
 def _norm_text(value: str) -> str:
@@ -67,6 +98,9 @@ def _clean_message_text(text: str, author: str | None) -> str:
                 candidate = candidate[len(author):].lstrip()
             return candidate
 
+        # "real text by Author" – accessibility suffix on short messages
+        text = re.sub(r"\s+by\s+" + escaped + r"\s*$", "", text).strip()
+
     return text
 
 
@@ -90,6 +124,42 @@ async def active_channel_name(page: Page) -> str | None:
     return await _active_channel_nav_text(page)
 
 
+async def _wait_for_nav_ready(
+    page: Page,
+    min_items: int = 3,
+    timeout_ms: float = 10_000,
+    poll_ms: float = 250,
+) -> None:
+    """Wait until the Teams navigation pane has rendered enough channel/chat entries.
+
+    Polls all CHANNEL_NAV_ITEM selectors every *poll_ms* milliseconds until the
+    total number of visible items reaches *min_items*, or *timeout_ms* elapses.
+
+    Raises:
+        TimeoutError: if the nav pane does not become ready within *timeout_ms*.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        count = 0
+        for s in sel.CHANNEL_NAV_ITEM:
+            try:
+                nodes = page.locator(s)
+                n = await nodes.count()
+            except Exception:
+                continue
+            for i in range(min(n, 20)):
+                if await _visible(nodes.nth(i), timeout_ms=80):
+                    count += 1
+                    if count >= min_items:
+                        log.debug("_wait_for_nav_ready: nav ready (%d visible items)", count)
+                        return
+        await page.wait_for_timeout(poll_ms)
+
+    raise TimeoutError(
+        f"Teams navigation pane did not show {min_items}+ items within {timeout_ms:.0f} ms"
+    )
+
+
 async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 15000) -> None:
     target = _norm_text(channel_name)
     if not target:
@@ -100,6 +170,7 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 1
         log.info("switch_to_channel: %r already active", channel_name)
         return
 
+    await _wait_for_nav_ready(page)
     item = await _find_channel_nav_item(page, channel_name)
     if item is None:
         raise RuntimeError(
@@ -294,8 +365,191 @@ async def _is_channel_active(page: Page, channel_name_norm: str) -> bool:
     return False
 
 
+async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMessage] | None:
+    """
+    Fast path: run all DOM scraping in a single JS evaluation (one browser round-trip).
+
+    Returns a list of ChannelMessage objects on success, or None if JS scraping found nothing
+    (so the caller can fall back to the slow Playwright-per-element path).
+    """
+    result = await page.evaluate(
+        """
+        ({regionSelectors, itemSelectors, authorSelectors, bodySelectors, maxItems}) => {
+            // Find the message list container
+            let region = document.body;
+            let regionSel = 'body';
+            for (const s of regionSelectors) {
+                const el = document.querySelector(s);
+                if (el && el.offsetParent !== null) { // visible check
+                    region = el;
+                    regionSel = s;
+                    break;
+                }
+            }
+
+            // Try each MESSAGE_ITEM selector inside the region
+            for (const itemSel of itemSelectors) {
+                const items = Array.from(region.querySelectorAll(itemSel));
+                if (items.length === 0) continue;
+
+                const messages = [];
+                for (const item of items.slice(0, maxItems)) {
+                    // Skip non-visible items
+                    const rect = item.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) continue;
+
+                    // Extract data-mid
+                    let mid = item.getAttribute('data-mid') || null;
+                    if (!mid) {
+                        const midEl = item.querySelector('[data-mid]');
+                        if (midEl) mid = midEl.getAttribute('data-mid');
+                    }
+
+                    // Extract author
+                    let author = null;
+                    for (const asel of authorSelectors) {
+                        const el = item.querySelector(asel);
+                        if (el) {
+                            const t = (el.innerText || '').trim();
+                            if (t) { author = t; break; }
+                        }
+                    }
+                    // Fallback: aria-label first segment
+                    if (!author) {
+                        const lbl = item.getAttribute('aria-label');
+                        if (lbl) {
+                            const part = lbl.split(',')[0].trim();
+                            if (part) author = part;
+                        }
+                    }
+
+                    // Extract body text — collect ALL matching body nodes first
+                    const bodyNodes = [];
+                    for (const bsel of bodySelectors) {
+                        const els = Array.from(item.querySelectorAll(bsel));
+                        if (els.length > 0) {
+                            for (const el of els) {
+                                const t = (el.innerText || '').trim();
+                                if (t) bodyNodes.push({ el, text: t });
+                            }
+                            break; // stop at first selector that yields results
+                        }
+                    }
+
+                    // Multi-body item with no author → emit each body node as its own message
+                    // (mirrors the slow-path fall-through to _scrape_messages_from_body_nodes)
+                    if (bodyNodes.length > 1 && !author) {
+                        for (let bi = 0; bi < bodyNodes.length; bi++) {
+                            const t = bodyNodes[bi].text;
+                            if (!t) continue;
+                            // Attempt to find a data-mid on the body node or closest ancestor
+                            let bmid = bodyNodes[bi].el.getAttribute('data-mid') || null;
+                            if (!bmid) {
+                                let anc = bodyNodes[bi].el.closest('[data-mid]');
+                                if (anc) bmid = anc.getAttribute('data-mid');
+                            }
+                            messages.push({ mid: bmid || mid, author: null, text: t, itemSel, regionSel, bodyIndex: bi });
+                        }
+                        continue;
+                    }
+
+                    let text = bodyNodes.length > 0 ? bodyNodes[0].text : null;
+
+                    // Fallback: full item inner text (trimmed, first 40 lines, <8000 chars)
+                    if (!text) {
+                        const raw = (item.innerText || '').trim();
+                        if (raw && raw.length < 8000) {
+                            const lines = raw.split('\\n').map(l => l.trim()).filter(Boolean);
+                            if (lines.length > 0) text = lines.slice(0, 40).join('\\n');
+                        }
+                    }
+
+                    if (!text || !text.trim()) continue;
+
+                    messages.push({ mid, author, text, itemSel, regionSel });
+                }
+
+                if (messages.length > 0) {
+                    return { messages, itemSel, regionSel };
+                }
+            }
+            return null;
+        }
+        """,
+        {
+            "regionSelectors": sel.MESSAGE_LIST_REGION,
+            "itemSelectors": sel.MESSAGE_ITEM,
+            "authorSelectors": sel.AUTHOR,
+            "bodySelectors": sel.BODY,
+            "maxItems": max_items,
+        },
+    )
+
+    if not result or not result.get("messages"):
+        return None
+
+    item_sel = result.get("itemSel", "js")
+    region_sel = result.get("regionSel", "body")
+    log.debug("scrape(js): item_sel=%r region_sel=%r count=%d", item_sel, region_sel, len(result["messages"]))
+
+    out: list[ChannelMessage] = []
+    seen: set[str] = set()
+    for i, raw in enumerate(result["messages"]):
+        text = (raw.get("text") or "").strip()
+        author = raw.get("author") or None
+        mid = raw.get("mid") or None
+
+        text = _clean_message_text(text, author)
+        if not text:
+            continue
+
+        if _is_date_separator(text, author):
+            log.debug("scrape(js): skipping date-separator %r", text)
+            continue
+
+        if mid:
+            stable = f"mid:{mid}"
+        else:
+            h = hashlib.sha256(
+                f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:24]
+            stable = f"hash:{h}"
+
+        if stable in seen:
+            continue
+        seen.add(stable)
+        out.append(
+            ChannelMessage(
+                stable_id=stable,
+                text=text,
+                author=author,
+                raw={"item_selector": item_sel, "index": i, "js": True},
+            )
+        )
+
+    log.info("scrape(js): returning %d unique messages (region=%r)", len(out), region_sel)
+    return out
+
+
 async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[ChannelMessage]:
-    """Best-effort: collect top-level posts currently in the virtualized viewport + nearby."""
+    """Best-effort: collect top-level posts currently in the virtualized viewport + nearby.
+
+    Uses a fast single-JS-evaluation path first; falls back to the slower
+    per-element Playwright path only when the JS pass returns nothing.
+    """
+    # ── Fast path: one JS round-trip ─────────────────────────────────────
+    try:
+        js_msgs = await _scrape_messages_js(page, max_items=max_items)
+    except Exception as exc:
+        log.debug("scrape(js): evaluation failed (%s), falling back to slow path", exc)
+        js_msgs = None
+
+    if js_msgs is not None:
+        return js_msgs
+
+    log.debug("scrape(js): returned nothing – falling back to slow per-element path")
+
+    # ── Slow fallback path (original Playwright-per-element approach) ─────
     region_sel = None
     for s in sel.MESSAGE_LIST_REGION:
         loc = page.locator(s).first
@@ -453,6 +707,9 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             if _looks_like_transcript_blob(raw):
                 log.debug("fallback: skipping transcript-like body node selector=%r index=%d", body_sel, i)
                 continue
+            if _is_date_separator(raw, None):
+                log.debug("fallback: skipping date-separator %r selector=%r index=%d", raw, body_sel, i)
+                continue
             norm = _norm_text(raw)
             if norm in seen_text:
                 continue
@@ -470,7 +727,7 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             except Exception:
                 pass
             if not stable_value:
-                stable_value = hashlib.sha256(f"{body_sel}|{i}|{raw[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
+                stable_value = hashlib.sha256(f"{raw[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
 
             out.append(
                 ChannelMessage(
@@ -555,6 +812,10 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
         log.debug("_parse_message_item: index=%d empty after cleaning, skipping", index)
         return None
 
+    if _is_date_separator(text, author):
+        log.debug("_parse_message_item: index=%d looks like date separator %r, skipping", index, text)
+        return None
+
     stable = await _stable_id_for_item(item, item_sel, index, text, author)
     log.debug("_parse_message_item: index=%d author=%r id=%s text=%r", index, author, stable, text[:80])
     return ChannelMessage(
@@ -574,7 +835,7 @@ async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: st
                 return f"mid:{mid}"
         except Exception:
             pass
-    h = hashlib.sha256(f"{item_sel}|{index}|{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
+    h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
         :24
     ]
     return f"hash:{h}"

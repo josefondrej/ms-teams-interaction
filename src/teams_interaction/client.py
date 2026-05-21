@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import socket
-import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -200,13 +199,13 @@ class TeamsClient:
         *,
         channel_name: str | None = None,
         include_existing: bool = False,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.25,
     ) -> asyncio.Task[None]:
         """
         Poll the channel on a dedicated tab and invoke ``on_message`` for new top-level posts.
 
-        The first successful scrape primes state (no callbacks). IDs are best-effort
-        (``data-mid`` when present, else a content hash).
+        Primes immediately on startup (no waiting for initial render).
+        IDs are best-effort (``data-mid`` when present, else a content hash).
         """
         task = asyncio.create_task(
             self._watch_channel_loop(channel_url, on_message, poll_interval, channel_name, include_existing)
@@ -224,68 +223,75 @@ class TeamsClient:
     ) -> None:
         await self._require_context()
         url = self._resolve_url(channel_url)
-        log.info("watch: opening page, url=%s channel=%r", url, channel_name)
-        page = await self._context.new_page()
-        await goto_channel(page, url)
+
+        # ── Page selection ────────────────────────────────────────────────────
+        # Prefer an already-loaded Teams page so that running watch alongside
+        # 'chat' (or any other command that keeps a tab alive) doesn't force a
+        # cold Teams load in a brand-new tab.
+        owns_page = False
+        page = None
+        try:
+            for p in list(self._context.pages):
+                if not p.is_closed() and "teams.microsoft.com" in p.url:
+                    page = p
+                    log.info("watch: reusing existing Teams page (url=%s)", p.url)
+                    break
+        except Exception:
+            pass
+
+        if page is None:
+            page = await self._context.new_page()
+            owns_page = True
+            log.info("watch: opening new page, url=%s channel=%r", url, channel_name)
+            await goto_channel(page, url)
+
         if channel_name:
             await switch_to_channel(page, channel_name)
+
         seen: set[str] = set()
-        primed = False
+
+        # ── Priming phase ────────────────────────────────────────────────────
+        # Snapshot whatever is currently in the DOM right now — no waiting.
+        try:
+            initial_msgs = await scrape_top_level_messages(page)
+        except Exception:
+            initial_msgs = []
+        for m in initial_msgs:
+            seen.add(m.stable_id)
+            if include_existing:
+                out = on_message(m)
+                if asyncio.iscoroutine(out):
+                    await out
+        log.info("watch: primed with %d existing message id(s)", len(seen))
+
+        # ── Poll loop ─────────────────────────────────────────────────────────
         poll_count = 0
-        prime_started = time.monotonic()
-        max_prime_wait_s = 20.0
         try:
             while True:
+                await asyncio.sleep(poll_interval)
                 poll_count += 1
                 try:
                     msgs = await scrape_top_level_messages(page)
                     log.debug("watch: poll #%d – scraped %d messages", poll_count, len(msgs))
-                    if not primed:
-                        if not msgs:
-                            waited = time.monotonic() - prime_started
-                            if waited < max_prime_wait_s:
-                                log.info(
-                                    "watch: waiting for initial message render before priming (%.1fs/%.1fs)",
-                                    waited,
-                                    max_prime_wait_s,
-                                )
-                                await asyncio.sleep(poll_interval)
-                                continue
-                            primed = True
-                            log.info("watch: primed empty after startup timeout (%.1fs)", waited)
-                            await asyncio.sleep(poll_interval)
+                    new_count = 0
+                    for m in msgs:
+                        if m.stable_id in seen:
                             continue
-
-                        for m in msgs:
-                            if m.stable_id in seen:
-                                continue
-                            seen.add(m.stable_id)
-                            if include_existing:
-                                out = on_message(m)
-                                if asyncio.iscoroutine(out):
-                                    await out
-                        primed = True
-                        log.info("watch: primed with %d existing message ids", len(seen))
-                    else:
-                        new_count = 0
-                        for m in msgs:
-                            if m.stable_id in seen:
-                                continue
-                            seen.add(m.stable_id)
-                            new_count += 1
-                            out = on_message(m)
-                            if asyncio.iscoroutine(out):
-                                await out
-                        if new_count:
-                            log.info("watch: poll #%d delivered %d new message(s)", poll_count, new_count)
+                        seen.add(m.stable_id)
+                        new_count += 1
+                        out = on_message(m)
+                        if asyncio.iscoroutine(out):
+                            await out
+                    if new_count:
+                        log.info("watch: poll #%d delivered %d new message(s)", poll_count, new_count)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     log.warning("watch: poll #%d error (will retry): %s", poll_count, exc, exc_info=True)
-                await asyncio.sleep(poll_interval)
         finally:
-            log.info("watch: loop ended, closing page")
-            await page.close()
+            log.info("watch: loop ended%s", ", closing page" if owns_page else "")
+            if owns_page:
+                await page.close()
 
     async def _require_context(self) -> None:
         if not self._context:
