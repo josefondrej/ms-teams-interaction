@@ -112,7 +112,7 @@ def _looks_like_transcript_blob(value: str) -> bool:
     text = value.strip()
     if not text:
         return False
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     return len(text) > 1500 or len(lines) > 12
 
 
@@ -146,7 +146,7 @@ def _clean_message_text(text: str, author: str | None) -> str:
             candidate = match.group(1).strip()
             # strip leading author name if it snuck in
             if candidate.startswith(author):
-                candidate = candidate[len(author) :].lstrip()
+                candidate = candidate[len(author):].lstrip()
             return candidate
 
         # "real text by Author" – accessibility suffix on short messages
@@ -188,10 +188,10 @@ async def active_channel_name(page: Page) -> str | None:
 
 
 async def _wait_for_nav_ready(
-    page: Page,
-    min_items: int = 1,
-    timeout_ms: float = 10_000,
-    poll_ms: float = 250,
+        page: Page,
+        min_items: int = 1,
+        timeout_ms: float = 10_000,
+        poll_ms: float = 250,
 ) -> None:
     """Wait until the Teams navigation pane has rendered enough channel/chat entries.
 
@@ -326,10 +326,10 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 3
 
 
 async def _wait_for_channel_active(
-    page: Page,
-    channel_name_norm: str,
-    clicked_item: Locator | None = None,
-    timeout_ms: float = 15000,
+        page: Page,
+        channel_name_norm: str,
+        clicked_item: Locator | None = None,
+        timeout_ms: float = 15000,
 ) -> None:
     """Poll until the channel heading matches *channel_name_norm* or the item is selected.
 
@@ -616,7 +616,10 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
                         const el = item.querySelector(asel);
                         if (el) {
                             const t = (el.innerText || '').trim();
-                            if (t) { author = t; break; }
+                            if (t) {
+                                author = t;
+                                break;
+                            }
                         }
                     }
                     // Fallback: aria-label first segment
@@ -635,7 +638,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
                         if (els.length > 0) {
                             for (const el of els) {
                                 const t = (el.innerText || '').trim();
-                                if (t) bodyNodes.push({ el, text: t });
+                                if (t) bodyNodes.push({el, text: t});
                             }
                             break; // stop at first selector that yields results
                         }
@@ -653,7 +656,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
                                 let anc = bodyNodes[bi].el.closest('[data-mid]');
                                 if (anc) bmid = anc.getAttribute('data-mid');
                             }
-                            messages.push({ mid: bmid || mid, author: null, text: t, itemSel, regionSel, bodyIndex: bi });
+                            messages.push({mid: bmid || mid, author: null, text: t, itemSel, regionSel, bodyIndex: bi});
                         }
                         continue;
                     }
@@ -671,11 +674,11 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
 
                     if (!text || !text.trim()) continue;
 
-                    messages.push({ mid, author, text, itemSel, regionSel });
+                    messages.push({mid, author, text, itemSel, regionSel});
                 }
 
                 if (messages.length > 0) {
-                    return { messages, itemSel, regionSel };
+                    return {messages, itemSel, regionSel};
                 }
             }
             return null;
@@ -697,7 +700,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
     region_sel = result.get("regionSel", "body")
     log.debug("scrape(js): item_sel=%r region_sel=%r count=%d", item_sel, region_sel, len(result["messages"]))
 
-    out: list[ChannelMessage] = []
+    scraped_messages: list[ChannelMessage] = []
     seen: set[str] = set()
     for msg_index, raw in enumerate(result["messages"]):
         text = (raw.get("text") or "").strip()
@@ -723,7 +726,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
         if stable in seen:
             continue
         seen.add(stable)
-        out.append(
+        scraped_messages.append(
             ChannelMessage(
                 stable_id=stable,
                 text=text,
@@ -732,8 +735,8 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
             )
         )
 
-    log.info("scrape(js): returning %d unique messages (region=%r)", len(out), region_sel)
-    return out
+    log.info("scrape(js): returning %d unique messages (region=%r)", len(scraped_messages), region_sel)
+    return scraped_messages
 
 
 async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[ChannelMessage]:
@@ -809,15 +812,15 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
 
     # Dedupe by stable_id while preserving order
     seen: set[str] = set()
-    out: list[ChannelMessage] = []
+    unique_messages: list[ChannelMessage] = []
     for message in messages:
         if message.stable_id in seen:
             continue
         seen.add(message.stable_id)
-        out.append(message)
+        unique_messages.append(message)
 
-    log.info("scrape: returning %d unique messages (region=%r)", len(out), region_sel)
-    return out
+    log.info("scrape: returning %d unique messages (region=%r)", len(unique_messages), region_sel)
+    return unique_messages
 
 
 async def inspect_message_dom(page: Page, max_samples: int = 5) -> dict[str, Any]:
@@ -925,7 +928,7 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
         List of :class:`~teams_interaction.types.ChannelMessage` instances,
         deduplicated by normalised text.
     """
-    out: list[ChannelMessage] = []
+    result_messages: list[ChannelMessage] = []
     seen_text: set[str] = set()
 
     for body_sel in sel.BODY:
@@ -938,8 +941,8 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             continue
         log.debug("fallback: body selector=%r count=%d", body_sel, node_count)
         for index in range(min(node_count, max_items * 2)):
-            if len(out) >= max_items:
-                return out
+            if len(result_messages) >= max_items:
+                return result_messages
             node = nodes.nth(index)
             if not await _visible(node, timeout_ms=120):
                 continue
@@ -975,7 +978,7 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             if not stable_value:
                 stable_value = hashlib.sha256(f"{raw[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
 
-            out.append(
+            result_messages.append(
                 ChannelMessage(
                     stable_id=f"{stable_prefix}:{stable_value}",
                     text=raw,
@@ -983,8 +986,8 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
                     raw={"fallback": True, "body_selector": body_sel, "index": index},
                 )
             )
-    log.info("fallback: extracted %d message body node(s)", len(out))
-    return out
+    log.info("fallback: extracted %d message body node(s)", len(result_messages))
+    return result_messages
 
 
 async def _parse_message_item(item: Locator, item_sel: str, index: int) -> ChannelMessage | None:
@@ -1008,15 +1011,15 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
     author: str | None = None
 
     for author_sel in sel.AUTHOR:
-        al = item.locator(author_sel)
+        author_locator = item.locator(author_sel)
         try:
-            if await al.count() == 0:
+            if await author_locator.count() == 0:
                 continue
         except Exception:
             continue
-        if await _visible(al.first, timeout_ms=150):
+        if await _visible(author_locator.first, timeout_ms=150):
             try:
-                author_text = (await al.inner_text()).strip()
+                author_text = (await author_locator.inner_text()).strip()
                 if author_text:
                     author = author_text
                     break
@@ -1026,22 +1029,22 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
     # Fallback: item-level aria-label sometimes encodes author
     if not author:
         try:
-            lbl = await item.get_attribute("aria-label")
-            if lbl:
-                part = lbl.split(",")[0].strip()
+            aria_label = await item.get_attribute("aria-label")
+            if aria_label:
+                part = aria_label.split(",")[0].strip()
                 if part:
                     author = part
         except Exception:
             pass
 
     for body_sel in sel.BODY:
-        bl = item.locator(body_sel)
+        body_locator = item.locator(body_sel)
         try:
-            cnt = await bl.count()
+            body_node_count = await body_locator.count()
         except Exception:
             continue
-        for body_index in range(min(cnt, 3)):
-            cell = bl.nth(body_index)
+        for body_index in range(min(body_node_count, 3)):
+            cell = body_locator.nth(body_index)
             if await _visible(cell, timeout_ms=100):
                 try:
                     raw = (await cell.inner_text()).strip()
@@ -1061,7 +1064,7 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
             fallback = (await item.inner_text()).strip()
             # Skip huge blobs (collapsed thread chrome)
             if fallback and len(fallback) < 8000:
-                lines = [ln.strip() for ln in fallback.splitlines() if ln.strip()]
+                lines = [line.strip() for line in fallback.splitlines() if line.strip()]
                 if lines:
                     blob = "\n".join(lines[:40])
                     if not (not author and (len(lines) > 1 or _looks_like_transcript_blob(blob))):
@@ -1144,24 +1147,24 @@ async def send_plain_text(page: Page, text: str) -> None:
     Raises:
         RuntimeError: If no compose textbox can be found.
     """
-    box: Locator | None = None
+    compose_box: Locator | None = None
     for selector in sel.COMPOSE:
         loc = page.locator(selector).first
         if await _visible(loc, timeout_ms=600):
-            box = loc
+            compose_box = loc
             break
-    if box is None:
+    if compose_box is None:
         raise RuntimeError("Could not find compose textbox; UI may have changed.")
 
-    await box.click()
-    await box.fill("")
+    await compose_box.click()
+    await compose_box.fill("")
     await page.keyboard.insert_text(text)
 
     clicked = False
     for selector in sel.SEND_BUTTON:
-        btn = page.locator(selector).first
-        if await _visible(btn, timeout_ms=400):
-            await btn.click()
+        send_button = page.locator(selector).first
+        if await _visible(send_button, timeout_ms=400):
+            await send_button.click()
             clicked = True
             break
     if not clicked:

@@ -36,13 +36,13 @@ class TeamsClient:
     """
 
     def __init__(
-        self,
-        *,
-        profile_dir: Path | str | None = None,
-        browser_channel: str | None = None,
-        executable_path: str | None = None,
-        headless: bool = False,
-        persistent: bool = True,
+            self,
+            *,
+            profile_dir: Path | str | None = None,
+            browser_channel: str | None = None,
+            executable_path: str | None = None,
+            headless: bool = False,
+            persistent: bool = True,
     ) -> None:
         """Initialise the client with browser configuration.
 
@@ -301,11 +301,11 @@ class TeamsClient:
             await page.close()
 
     async def inspect_channel(
-        self,
-        channel_url: str | None = None,
-        *,
-        channel_name: str | None = None,
-        max_samples: int = 5,
+            self,
+            channel_url: str | None = None,
+            *,
+            channel_name: str | None = None,
+            max_samples: int = 5,
     ) -> dict[str, Any]:
         """Navigate to a channel and return a diagnostic DOM snapshot.
 
@@ -335,13 +335,13 @@ class TeamsClient:
             await page.close()
 
     def watch_channel(
-        self,
-        channel_url: str | None,
-        on_message: MessageHandler,
-        *,
-        channel_name: str | None = None,
-        include_existing: bool = False,
-        poll_interval: float = 0.25,
+            self,
+            channel_url: str | None,
+            on_message: MessageHandler,
+            *,
+            channel_name: str | None = None,
+            include_existing: bool = False,
+            poll_interval: float = 0.25,
     ) -> asyncio.Task[None]:
         """
         Poll the channel on a dedicated tab and invoke ``on_message`` for new top-level posts.
@@ -369,12 +369,12 @@ class TeamsClient:
         return task
 
     async def _watch_channel_loop(
-        self,
-        channel_url: str | None,
-        on_message: MessageHandler,
-        poll_interval: float,
-        channel_name: str | None,
-        include_existing: bool,
+            self,
+            channel_url: str | None,
+            on_message: MessageHandler,
+            poll_interval: float,
+            channel_name: str | None,
+            include_existing: bool,
     ) -> None:
         """Background coroutine that continuously scrapes and emits new messages.
 
@@ -412,10 +412,10 @@ class TeamsClient:
                 await page.close()
 
     async def _prime_seen(
-        self,
-        page: Any,
-        include_existing: bool,
-        on_message: MessageHandler,
+            self,
+            page: Any,
+            include_existing: bool,
+            on_message: MessageHandler,
     ) -> set[str]:
         """Snapshot whatever is currently in the DOM and optionally forward messages.
 
@@ -446,11 +446,11 @@ class TeamsClient:
         return seen
 
     async def _run_poll_loop(
-        self,
-        page: Any,
-        poll_interval: float,
-        seen: set[str],
-        on_message: MessageHandler,
+            self,
+            page: Any,
+            poll_interval: float,
+            seen: set[str],
+            on_message: MessageHandler,
     ) -> None:
         """Continuously scrape the page and emit newly appeared messages.
 
