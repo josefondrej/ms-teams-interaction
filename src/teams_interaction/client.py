@@ -30,7 +30,7 @@ class TeamsClient:
     """
     Browser-driven Teams client (persistent profile, no Azure registration).
 
-    Uses Playwright with Chromium/Edge; set TEAMS_BROWSER_CHANNEL / TEAMS_BROWSER_EXECUTABLE.
+    Uses Playwright with Chromium/Edge; set TEAMS_BROWSER_DIST / TEAMS_BROWSER_EXECUTABLE.
     """
 
     def __init__(
@@ -48,7 +48,7 @@ class TeamsClient:
                 str(Path.home() / ".cache" / "ms-teams-interaction" / "browser-profile"),
             )
         )
-        self._browser_channel = browser_channel or os.environ.get("TEAMS_BROWSER_CHANNEL", "msedge")
+        self._browser_channel = browser_channel or os.environ.get("TEAMS_BROWSER_DIST", "msedge")
         exe = executable_path or os.environ.get("TEAMS_BROWSER_EXECUTABLE")
         self._executable_path = exe if exe else None
         self._headless = headless
