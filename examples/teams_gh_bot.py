@@ -65,6 +65,7 @@ def _strip_ansi(text: str) -> str:
 # GitHub Copilot CLI helper
 # ---------------------------------------------------------------------------
 
+
 async def ask_github_copilot(user_message: str, *, extra_args: list[str] | None = None) -> str:
     """Send *user_message* to the GitHub Copilot CLI agent and return its reply.
 
@@ -123,6 +124,7 @@ async def ask_github_copilot(user_message: str, *, extra_args: list[str] | None 
 # ---------------------------------------------------------------------------
 # Bot logic
 # ---------------------------------------------------------------------------
+
 
 class TeamsGhBot:
     """Watch a Teams channel and reply to every new message via the GitHub Copilot CLI.
@@ -223,8 +225,7 @@ class TeamsGhBot:
                 reply = await ask_github_copilot(text, extra_args=self.extra_args)
 
                 wrapped = "\n".join(
-                    textwrap.fill(line, width=120) if len(line) > 120 else line
-                    for line in reply.splitlines()
+                    textwrap.fill(line, width=120) if len(line) > 120 else line for line in reply.splitlines()
                 )
                 full_reply = f"{self.bot_prefix}{wrapped}"
 
@@ -250,9 +251,7 @@ class TeamsGhBot:
     async def run(self) -> None:
         """Start the browser, begin watching, and block until interrupted."""
         await self._client.start()
-        full_cmd = "copilot -p \"…\" -s --allow-all-tools" + (
-            f" {' '.join(self.extra_args)}" if self.extra_args else ""
-        )
+        full_cmd = 'copilot -p "…" -s --allow-all-tools' + (f" {' '.join(self.extra_args)}" if self.extra_args else "")
         print(
             f"\n🚀  Teams-Copilot bot started.\n"
             f"    Channel  : {self.channel_name}\n"
@@ -289,12 +288,13 @@ class TeamsGhBot:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="teams_gh_bot",
         description=(
             "Watch a Teams channel and reply to new messages using "
-            "the GitHub Copilot CLI (`copilot -p \"…\" -s --allow-all-tools`)."
+            'the GitHub Copilot CLI (`copilot -p "…" -s --allow-all-tools`).'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
@@ -356,7 +356,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable self-message filtering (may cause reply loops)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable DEBUG logging to stderr",
     )
