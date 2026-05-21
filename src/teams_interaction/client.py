@@ -87,6 +87,9 @@ class TeamsClient:
         self._owns_browser: bool = False
         self._tasks: list[asyncio.Task[Any]] = []
         self._run_guard = asyncio.Lock()
+        # Pages opened by *this* client instance.  Used by _acquire_page to avoid
+        # stealing tabs that belong to a sibling CLI process sharing the browser.
+        self._my_pages: set[Any] = set()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -108,15 +111,17 @@ class TeamsClient:
         return self._profile_dir / ".cdp-port"
 
     async def start(self) -> None:
-        """Launch (or reattach to) the browser and create a context.
+        """Launch the browser and create a context.
 
         When *persistent* is ``True`` (the default), a ``user_data_dir`` is
-        used so the user stays signed in between runs.  If a ``.cdp-port``
-        file exists, attempts to connect to an already-running browser over
-        CDP first.
+        used so the user stays signed in between runs.  If the configured
+        profile directory is already locked by another process, numbered
+        slots are tried in order (``browser-profile``, ``browser-profile-1``,
+        ``browser-profile-2``, …) so that each CLI process gets its own
+        independent browser window.
 
         When *persistent* is ``False``, a plain ephemeral browser is launched
-        (no profile, no CDP reuse).  The user must sign in every time.
+        (no profile).  The user must sign in every time.
 
         This method is idempotent: calling it more than once is safe.
         """
@@ -126,7 +131,7 @@ class TeamsClient:
             self._playwright = await async_playwright().start()
 
             if not self._persistent:
-                # ── Ephemeral (fresh) browser – no profile, no CDP reuse ─────
+                # ── Ephemeral (fresh) browser – no profile ────────────────────
                 log.info("start: launching ephemeral browser (no persistent profile)")
                 launch_kwargs: dict[str, Any] = dict(
                     headless=self._headless,
@@ -146,92 +151,82 @@ class TeamsClient:
                 self._owns_browser = True
                 return
 
-            # ── Persistent profile path ───────────────────────────────────────
-            self._profile_dir.mkdir(parents=True, exist_ok=True)
-
-            # ── Try to reuse an already-running browser instance ──────────────
-            port_file = self._port_file()
-            if port_file.exists():
-                try:
-                    port = int(port_file.read_text().strip())
-                    log.info("start: found CDP port %d – connecting to existing browser", port)
-                    self._browser = await self._playwright.chromium.connect_over_cdp(
-                        f"http://127.0.0.1:{port}"
-                    )
-                    # Persistent-context browsers expose their context as contexts[0]
-                    self._context = (
-                        self._browser.contexts[0]
-                        if self._browser.contexts
-                        else await self._browser.new_context()
-                    )
-                    self._owns_browser = False
-                    await self._close_non_teams_tabs()
-                    log.info("start: attached to existing browser (pid unknown, port=%d)", port)
-                    return
-                except Exception as exc:
-                    log.info("start: could not reuse existing browser (%s) – launching fresh", exc)
-                    port_file.unlink(missing_ok=True)
-                    self._browser = None
-
-            # ── Launch a brand-new browser and advertise its debug port ───────
-            port = self._free_port()
-            base: dict[str, Any] = dict(
-                user_data_dir=str(self._profile_dir),
-                headless=self._headless,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    f"--remote-debugging-port={port}",
-                    # Prevent Edge/Chrome from opening extra tabs on launch
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-session-crashed-bubble",
-                    "--restore-last-session=false",
-                ],
-            )
-            launch_ok = False
-            try:
-                if self._executable_path:
-                    base["executable_path"] = self._executable_path
-                    self._context = await self._playwright.chromium.launch_persistent_context(**base)
-                else:
-                    try:
-                        base["channel"] = self._browser_channel
-                        self._context = await self._playwright.chromium.launch_persistent_context(**base)
-                    except Exception:
-                        base.pop("channel", None)
-                        self._context = await self._playwright.chromium.launch_persistent_context(**base)
-                launch_ok = True
-            except Exception as launch_exc:
-                # The profile directory may be locked by another process that has
-                # not yet written its port file (race condition) or whose port file
-                # we could not connect to earlier.  Poll for the port file and try
-                # CDP-attach before giving up.
-                log.info(
-                    "start: launch_persistent_context failed (%s) – "
-                    "waiting for another process to advertise its CDP port …",
-                    launch_exc,
+            # ── Persistent profile: try numbered slots until one is free ──────
+            # Each client gets its own browser window so processes are fully
+            # independent — closing one does not affect any other.
+            base_dir = self._profile_dir
+            _MAX_SLOTS = 16
+            last_exc: Exception | None = None
+            for slot in range(_MAX_SLOTS):
+                profile_dir = base_dir if slot == 0 else Path(str(base_dir) + f"-{slot}")
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                port = self._free_port()
+                launch_args: dict[str, Any] = dict(
+                    user_data_dir=str(profile_dir),
+                    headless=self._headless,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        f"--remote-debugging-port={port}",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-session-crashed-bubble",
+                        "--restore-last-session=false",
+                    ],
                 )
-                attached = await self._wait_and_attach_cdp(port_file, timeout=30.0)
-                if not attached:
-                    raise
+                try:
+                    if self._executable_path:
+                        launch_args["executable_path"] = self._executable_path
+                        self._context = await self._playwright.chromium.launch_persistent_context(
+                            **launch_args
+                        )
+                    else:
+                        try:
+                            launch_args["channel"] = self._browser_channel
+                            self._context = await self._playwright.chromium.launch_persistent_context(
+                                **launch_args
+                            )
+                        except Exception:
+                            launch_args.pop("channel", None)
+                            self._context = await self._playwright.chromium.launch_persistent_context(
+                                **launch_args
+                            )
+                except Exception as exc:
+                    log.info(
+                        "start: slot %d (%s) unavailable (%s) – trying next …",
+                        slot,
+                        profile_dir.name,
+                        exc,
+                    )
+                    last_exc = exc
+                    self._context = None
+                    continue
 
-            if self._context is None:
-                # Should not happen, but guard against it.
-                raise RuntimeError("start: browser context is None after launch/attach")
-
-            if launch_ok:
+                # ── Slot acquired ─────────────────────────────────────────────
+                # Update profile_dir so _port_file() / close() use the right path.
+                self._profile_dir = profile_dir
                 self._owns_browser = True
-                port_file.write_text(str(port))
-                log.info("start: launched new browser, CDP port=%d written to %s", port, port_file)
-            await self._close_non_teams_tabs()
+                self._port_file().write_text(str(port))
+                log.info(
+                    "start: launched browser in slot %d (profile=%s, port=%d)",
+                    slot,
+                    profile_dir.name,
+                    port,
+                )
+                await self._cleanup_startup_tabs()
+                return
+
+            raise RuntimeError(
+                f"start: could not launch browser in any of {_MAX_SLOTS} profile slots; "
+                "all profile directories appear to be locked"
+            ) from last_exc
 
     async def close(self) -> None:
         """Cancel background tasks and tear down the browser connection.
 
-        If this client owns the browser (i.e. it launched it), the browser /
-        context is closed.  For persistent-profile browsers the port file is
-        also removed.  If the client only attached to an existing browser, the
-        context and browser are left alive for other consumers.
+        Each persistent client owns its own browser window (launched in its
+        own profile slot), so the browser is always closed here.  The port
+        file for the slot is also removed so future processes can reuse the
+        same slot.
         """
         async with self._run_guard:
             for t in self._tasks:
@@ -240,29 +235,19 @@ class TeamsClient:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
             if self._context:
-                if self._owns_browser:
-                    if self._persistent:
-                        # Closing the persistent context also closes the browser
-                        await self._context.close()
-                        self._port_file().unlink(missing_ok=True)
-                    else:
-                        # Ephemeral: close context then browser separately
-                        await self._context.close()
-                # If we only attached, leave the context/browser alive for other consumers
+                try:
+                    await self._context.close()
+                except Exception as exc:
+                    log.debug("close: error closing context (may already be closed): %s", exc)
+                if self._persistent:
+                    self._port_file().unlink(missing_ok=True)
+                self._my_pages.clear()
                 self._context = None
             if self._browser:
-                if not self._owns_browser:
-                    # Detach without killing the browser
-                    try:
-                        await self._browser.close()
-                    except Exception:
-                        pass
-                elif not self._persistent:
-                    # Ephemeral – we own it, kill it
-                    try:
-                        await self._browser.close()
-                    except Exception:
-                        pass
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
                 self._browser = None
             if self._playwright:
                 await self._playwright.stop()
@@ -307,7 +292,7 @@ class TeamsClient:
         """
         await self._require_context()
         url = self._resolve_url(channel_url)
-        page = await self._context.new_page()
+        page = await self._new_page()
         try:
             await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
             if channel_name:
@@ -341,7 +326,7 @@ class TeamsClient:
         """
         await self._require_context()
         url = self._resolve_url(channel_url)
-        page = await self._context.new_page()
+        page = await self._new_page()
         try:
             await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
             if channel_name:
@@ -468,82 +453,71 @@ class TeamsClient:
         {"", "about:blank", "about:newtab", "chrome://newtab/", "edge://newtab/"}
     )
 
-    async def _wait_and_attach_cdp(self, port_file: Path, *, timeout: float = 30.0) -> bool:
-        """Poll *port_file* until another process writes a CDP port, then attach.
 
-        Used as a fallback when ``launch_persistent_context`` fails because the
-        profile directory is already locked by a sibling CLI process.  Waits up
-        to *timeout* seconds for the port file to appear / become readable, then
-        connects via CDP and populates ``self._browser`` / ``self._context``.
+    async def _cleanup_startup_tabs(self) -> None:
+        """Reduce the browser to a single usable tab after launch.
 
-        Args:
-            port_file: Path to the ``.cdp-port`` file to watch.
-            timeout: Maximum number of seconds to wait.
+        Closes every page that is not the one we want to keep, including
+        leftover tabs restored from a previous session.  The surviving tab is
+        registered in ``self._my_pages`` so ``_acquire_page`` can recycle it.
 
-        Returns:
-            ``True`` when the attachment succeeded, ``False`` when it timed out
-            or every connection attempt failed.
-        """
-        deadline = asyncio.get_event_loop().time() + timeout
-        poll_interval = 0.25
-        last_port: int | None = None
-        log.info("_wait_and_attach_cdp: polling %s for up to %.0fs …", port_file, timeout)
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                if port_file.exists():
-                    port = int(port_file.read_text().strip())
-                    if port != last_port:
-                        last_port = port
-                        log.info("_wait_and_attach_cdp: found port %d – trying CDP …", port)
-                    try:
-                        self._browser = await self._playwright.chromium.connect_over_cdp(
-                            f"http://127.0.0.1:{port}"
-                        )
-                        self._context = (
-                            self._browser.contexts[0]
-                            if self._browser.contexts
-                            else await self._browser.new_context()
-                        )
-                        self._owns_browser = False
-                        log.info("_wait_and_attach_cdp: attached to existing browser on port %d", port)
-                        return True
-                    except Exception as exc:
-                        log.debug("_wait_and_attach_cdp: connect attempt failed (%s), retrying …", exc)
-            except Exception as exc:
-                log.debug("_wait_and_attach_cdp: error reading port file (%s), retrying …", exc)
-            await asyncio.sleep(poll_interval)
-        log.warning("_wait_and_attach_cdp: timed out after %.0fs", timeout)
-        return False
+        Priority:
+        1. If a Teams tab exists, keep the first one and close everything else.
+        2. Otherwise keep the first blank tab and close everything else.
+        3. If there are no pages at all, do nothing (``_new_page`` will create
+           one when needed).
 
-    async def _close_non_teams_tabs(self) -> None:
-        """Close all blank / stale tabs that are not a Teams page.
-
-        Called after launching or reattaching to the persistent browser so that
-        blank tabs created automatically by the browser (or left over from a
-        previous session) are cleaned up.  Only tabs whose URL is in the
-        well-known blank-URL set are closed; any other non-Teams URL is left
-        alone to avoid accidentally closing something the user cares about.
+        At least one tab is always left alive because Chrome becomes unstable
+        with zero open tabs.
         """
         if not self._context:
             return
-        for page in list(self._context.pages):
-            if page.is_closed():
+
+        all_pages = [p for p in self._context.pages if not p.is_closed()]
+        if not all_pages:
+            return
+
+        teams_pages = [p for p in all_pages if "teams.microsoft.com" in p.url]
+        blank_pages = [p for p in all_pages if p.url in self._BLANK_URLS]
+
+        # Decide which single tab to keep.
+        if teams_pages:
+            keeper = teams_pages[0]
+        elif blank_pages:
+            keeper = blank_pages[0]
+        else:
+            # Non-blank, non-Teams leftovers only — keep the first one and
+            # navigate it to Teams later via _acquire_page.
+            keeper = all_pages[0]
+
+        self._my_pages.add(keeper)
+
+        # Close everything else.
+        closed = 0
+        for p in all_pages:
+            if p is keeper:
                 continue
-            if "teams.microsoft.com" not in page.url and page.url in self._BLANK_URLS:
-                log.info("start: closing blank tab (url=%r)", page.url)
-                try:
-                    await page.close()
-                except Exception as exc:
-                    log.debug("start: could not close blank tab: %s", exc)
+            try:
+                await p.close()
+                closed += 1
+                log.debug("_cleanup_startup_tabs: closed tab url=%r", p.url)
+            except Exception as exc:
+                log.debug("_cleanup_startup_tabs: could not close tab url=%r: %s", p.url, exc)
+
+        log.info(
+            "_cleanup_startup_tabs: kept url=%r, closed %d other tab(s)",
+            keeper.url,
+            closed,
+        )
 
     async def _acquire_page(self, url: str, *, owns_page_out: list[bool]) -> Any:
         """Return a page suitable for Teams interaction.
 
         Strategy (in order):
 
-        1. Reuse an existing Teams tab — no navigation needed.
-        2. Reuse an existing blank/newtab — navigate it to *url* instead of
-           spawning a second blank tab alongside it.
+        1. Reuse an existing Teams tab owned by this client — no navigation needed.
+        2. Reuse an existing blank/newtab owned by this client — navigate it to
+           *url* instead of spawning a second blank tab alongside it.
         3. Open a brand-new page and navigate it to *url*.
 
         *owns_page_out* is a single-element list used as an out-parameter; it
@@ -552,13 +526,17 @@ class TeamsClient:
         """
         pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
 
-        for p in pages:
+        # Only consider pages that *this* client opened — never steal a tab
+        # from another process that shares the same browser context via CDP.
+        my_pages = [p for p in pages if p in self._my_pages]
+
+        for p in my_pages:
             if "teams.microsoft.com" in p.url:
                 log.info("_acquire_page: reusing existing Teams page (url=%s)", p.url)
                 owns_page_out[0] = False
                 return p
 
-        for p in pages:
+        for p in my_pages:
             if p.url in self._BLANK_URLS:
                 log.info("_acquire_page: reusing blank tab, navigating to %s", url)
                 owns_page_out[0] = True
@@ -566,9 +544,58 @@ class TeamsClient:
                 return p
 
         log.info("_acquire_page: opening new page, url=%s", url)
-        p = await self._context.new_page()  # type: ignore[union-attr]
+        p = await self._new_page()
         owns_page_out[0] = True
         await goto_channel(p, url, timeout_ms=self._nav_timeout_ms)
+        return p
+
+    async def _new_page(self) -> Any:
+        """Open a new browser tab, with a ``window.open`` fallback.
+
+        ``BrowserContext.new_page()`` sends ``Target.createTarget`` over the
+        CDP debug port.  Chrome refuses this for the default persistent context
+        when connected externally; in that case we fall back to calling
+        ``window.open('about:blank', '_blank')`` on an existing page, which
+        bypasses the restriction because the tab is created by the renderer.
+
+        The new page is registered in ``self._my_pages`` automatically.
+
+        Returns:
+            A :class:`playwright.async_api.Page` for the new tab.
+        """
+        try:
+            p = await self._context.new_page()  # type: ignore[union-attr]
+            self._my_pages.add(p)
+            return p
+        except Exception as exc:
+            log.warning(
+                "_new_page: context.new_page() failed (%s) – using window.open fallback", exc
+            )
+            return await self._open_page_via_js()
+
+    async def _open_page_via_js(self) -> Any:
+        """Open a new blank tab via ``window.open`` on an existing page.
+
+        This method is used as a fallback when :meth:`_new_page` fails (e.g.
+        when Chrome disallows ``Target.createTarget`` over an external CDP
+        connection for a persistent context).
+
+        Returns:
+            The newly opened :class:`playwright.async_api.Page`.
+
+        Raises:
+            RuntimeError: If there are no open pages to trigger ``window.open`` from.
+        """
+        pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
+        if not pages:
+            raise RuntimeError(
+                "_open_page_via_js: no open pages available to trigger window.open"
+            )
+        async with self._context.expect_page() as page_info:  # type: ignore[union-attr]
+            await pages[0].evaluate("() => window.open('about:blank', '_blank')")
+        p = await page_info.value
+        self._my_pages.add(p)
+        log.info("_open_page_via_js: opened new tab via window.open")
         return p
 
     async def _require_context(self) -> None:
