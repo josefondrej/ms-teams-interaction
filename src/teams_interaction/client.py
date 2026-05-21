@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import BrowserContext, async_playwright
 
-from teams_interaction.dom import goto_channel, normalize_teams_url, scrape_top_level_messages, send_plain_text
+from teams_interaction.dom import (
+    goto_channel,
+    inspect_message_dom,
+    normalize_teams_url,
+    scrape_top_level_messages,
+    send_plain_text,
+    switch_to_channel,
+)
 from teams_interaction.types import ChannelMessage
 
 MessageHandler = Callable[[ChannelMessage], Awaitable[None] | None]
+DEFAULT_TEAMS_URL = "https://teams.microsoft.com/v2/"
+
+log = logging.getLogger(__name__)
 
 
 class TeamsClient:
@@ -81,28 +93,52 @@ class TeamsClient:
                 await self._playwright.stop()
                 self._playwright = None
 
-    async def open_channel(self, channel_url: str) -> None:
-        """Open a channel in a new tab (useful for first login)."""
+    async def open_channel(self, channel_url: str | None = None, *, channel_name: str | None = None) -> None:
+        """Open Teams in a new tab and optionally switch to a channel by visible name."""
         await self._require_context()
-        url = normalize_teams_url(channel_url)
+        url = self._resolve_url(channel_url)
         page = await self._context.new_page()
         await goto_channel(page, url)
+        if channel_name:
+            await switch_to_channel(page, channel_name)
 
-    async def send_message(self, channel_url: str, text: str) -> None:
+    async def send_message(self, channel_url: str | None, text: str, *, channel_name: str | None = None) -> None:
         await self._require_context()
-        url = normalize_teams_url(channel_url)
+        url = self._resolve_url(channel_url)
         page = await self._context.new_page()
         try:
             await goto_channel(page, url)
+            if channel_name:
+                await switch_to_channel(page, channel_name)
             await send_plain_text(page, text)
+        finally:
+            await page.close()
+
+    async def inspect_channel(
+        self,
+        channel_url: str | None = None,
+        *,
+        channel_name: str | None = None,
+        max_samples: int = 5,
+    ) -> dict[str, Any]:
+        await self._require_context()
+        url = self._resolve_url(channel_url)
+        page = await self._context.new_page()
+        try:
+            await goto_channel(page, url)
+            if channel_name:
+                await switch_to_channel(page, channel_name)
+            return await inspect_message_dom(page, max_samples=max_samples)
         finally:
             await page.close()
 
     def watch_channel(
         self,
-        channel_url: str,
+        channel_url: str | None,
         on_message: MessageHandler,
         *,
+        channel_name: str | None = None,
+        include_existing: bool = False,
         poll_interval: float = 2.0,
     ) -> asyncio.Task[None]:
         """
@@ -111,47 +147,91 @@ class TeamsClient:
         The first successful scrape primes state (no callbacks). IDs are best-effort
         (``data-mid`` when present, else a content hash).
         """
-        task = asyncio.create_task(self._watch_channel_loop(channel_url, on_message, poll_interval))
+        task = asyncio.create_task(
+            self._watch_channel_loop(channel_url, on_message, poll_interval, channel_name, include_existing)
+        )
         self._tasks.append(task)
         return task
 
     async def _watch_channel_loop(
         self,
-        channel_url: str,
+        channel_url: str | None,
         on_message: MessageHandler,
         poll_interval: float,
+        channel_name: str | None,
+        include_existing: bool,
     ) -> None:
         await self._require_context()
-        url = normalize_teams_url(channel_url)
+        url = self._resolve_url(channel_url)
+        log.info("watch: opening page, url=%s channel=%r", url, channel_name)
         page = await self._context.new_page()
         await goto_channel(page, url)
+        if channel_name:
+            await switch_to_channel(page, channel_name)
         seen: set[str] = set()
         primed = False
+        poll_count = 0
+        prime_started = time.monotonic()
+        max_prime_wait_s = 20.0
         try:
             while True:
+                poll_count += 1
                 try:
                     msgs = await scrape_top_level_messages(page)
+                    log.debug("watch: poll #%d – scraped %d messages", poll_count, len(msgs))
                     if not primed:
-                        for m in msgs:
-                            seen.add(m.stable_id)
-                        primed = True
-                    else:
+                        if not msgs:
+                            waited = time.monotonic() - prime_started
+                            if waited < max_prime_wait_s:
+                                log.info(
+                                    "watch: waiting for initial message render before priming (%.1fs/%.1fs)",
+                                    waited,
+                                    max_prime_wait_s,
+                                )
+                                await asyncio.sleep(poll_interval)
+                                continue
+                            primed = True
+                            log.info("watch: primed empty after startup timeout (%.1fs)", waited)
+                            await asyncio.sleep(poll_interval)
+                            continue
+
                         for m in msgs:
                             if m.stable_id in seen:
                                 continue
                             seen.add(m.stable_id)
+                            if include_existing:
+                                out = on_message(m)
+                                if asyncio.iscoroutine(out):
+                                    await out
+                        primed = True
+                        log.info("watch: primed with %d existing message ids", len(seen))
+                    else:
+                        new_count = 0
+                        for m in msgs:
+                            if m.stable_id in seen:
+                                continue
+                            seen.add(m.stable_id)
+                            new_count += 1
                             out = on_message(m)
                             if asyncio.iscoroutine(out):
                                 await out
+                        if new_count:
+                            log.info("watch: poll #%d delivered %d new message(s)", poll_count, new_count)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    # Keep polling; UI may be loading or selectors outdated.
-                    pass
+                except Exception as exc:
+                    log.warning("watch: poll #%d error (will retry): %s", poll_count, exc, exc_info=True)
                 await asyncio.sleep(poll_interval)
         finally:
+            log.info("watch: loop ended, closing page")
             await page.close()
 
     async def _require_context(self) -> None:
         if not self._context:
             raise RuntimeError("Call await client.start() first")
+
+    def _resolve_url(self, channel_url: str | None) -> str:
+        if not channel_url:
+            return DEFAULT_TEAMS_URL
+        return normalize_teams_url(channel_url)
+

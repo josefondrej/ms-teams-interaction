@@ -51,3 +51,37 @@ async def test_scrape_top_level_messages_dedupes_duplicate_mid(page: Page) -> No
     msgs = await scrape_top_level_messages(page, max_items=10)
     assert [m.stable_id for m in msgs] == ["mid:shared"]
     assert msgs[0].text == "First"
+
+
+async def test_scrape_top_level_messages_fallback_body_nodes(page: Page) -> None:
+    html = """<!DOCTYPE html>
+<html><body>
+<div id="unexpected-wrapper">
+  <div data-tid="message-content-rich">Hello Copilot, here is the body. This is what you should look for.</div>
+</div>
+</body></html>"""
+    await page.set_content(html)
+
+    msgs = await scrape_top_level_messages(page, max_items=10)
+
+    assert len(msgs) >= 1
+    assert any("Hello Copilot, here is the body." in m.text for m in msgs)
+
+
+async def test_scrape_top_level_messages_skips_multi_message_container(page: Page) -> None:
+    html = """<!DOCTYPE html>
+<html><body>
+<div role="main">
+  <div role="article">
+    <div dir="auto">First visible message</div>
+    <div dir="auto">Second visible message</div>
+  </div>
+</div>
+</body></html>"""
+    await page.set_content(html)
+
+    msgs = await scrape_top_level_messages(page, max_items=10)
+
+    assert [m.text for m in msgs] == ["First visible message", "Second visible message"]
+
+

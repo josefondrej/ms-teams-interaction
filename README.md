@@ -2,7 +2,7 @@
 
 Automate **Microsoft Teams (M365)** in the **browser** only: no Azure app registration, no Microsoft Graph. You sign in once (including MFA); a persistent profile keeps the session.
 
-**Scope (v0.1):** standard **team channels** only, **top-level** posts, **plain text**. You identify channels by **full Teams web URL** (from *Copy link to channel*).
+**Scope (v0.1):** standard **team channels** only, **top-level** posts, **plain text**. Target a channel by visible channel name (`channel_name` / `--channel`); channel selection is done via DOM clicking, not URL navigation.
 
 ---
 
@@ -166,14 +166,18 @@ async def main():
     async def on_message(msg: ChannelMessage):
         print(msg.author or "?", ":", msg.text[:200])
 
+    # channel_name selects via DOM clicking; no URL needed for watch
     client.watch_channel(
-        "https://teams.microsoft.com/l/channel/...",
+        None,
         on_message,
+        channel_name="General",
+        include_existing=False,
         poll_interval=2.0,
     )
     await client.send_message(
-        "https://teams.microsoft.com/l/channel/...",
+        None,
         "Hello from the SDK",
+        channel_name="General",
     )
     try:
         await asyncio.Future()
@@ -192,9 +196,14 @@ Selectors on `teams.microsoft.com` change; if watching breaks after a Teams upda
 With the venv activated and `pip install -e ".[cli]"` done:
 
 ```bash
+teams-interaction open --channel 'General'
+teams-interaction send --channel 'General' --text 'Hello'
+teams-interaction watch --channel 'General' --interval 2
+teams-interaction watch --channel 'General' --include-existing --interval 2
+
+# open and send support an optional --url to navigate to a specific Teams deep-link first.
 teams-interaction open --url 'https://teams.microsoft.com/l/channel/...'
-teams-interaction send --url '...' --text 'Hello'
-teams-interaction watch --url '...' --interval 2
+teams-interaction send --url 'https://teams.microsoft.com/v2/' --channel 'General' --text 'Hello'
 ```
 
 Or run the module:
