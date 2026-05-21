@@ -129,96 +129,101 @@ class TeamsClient:
             if self._context:
                 return
             self._playwright = await async_playwright().start()
-
             if not self._persistent:
-                # ── Ephemeral (fresh) browser – no profile ────────────────────
-                log.info("start: launching ephemeral browser (no persistent profile)")
-                launch_kwargs: dict[str, Any] = dict(
-                    headless=self._headless,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
+                await self._start_ephemeral()
+                return
+            await self._start_persistent()
+
+    async def _start_ephemeral(self) -> None:
+        """Launch a fresh ephemeral browser with no persistent profile."""
+        log.info("start: launching ephemeral browser (no persistent profile)")
+        launch_kwargs: dict[str, Any] = dict(
+            headless=self._headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        if self._executable_path:
+            launch_kwargs["executable_path"] = self._executable_path
+            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        else:
+            try:
+                launch_kwargs["channel"] = self._browser_channel
+                self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+            except Exception:
+                launch_kwargs.pop("channel", None)
+                self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        self._context = await self._browser.new_context()
+        self._owns_browser = True
+
+    async def _start_persistent(self) -> None:
+        """Launch a persistent-profile browser, trying numbered slots until one is free.
+
+        Each client gets its own browser window so processes are fully
+        independent — closing one does not affect any other.
+        """
+        base_dir = self._profile_dir
+        _MAX_SLOTS = 16
+        last_exc: Exception | None = None
+        for slot in range(_MAX_SLOTS):
+            profile_dir = base_dir if slot == 0 else Path(str(base_dir) + f"-{slot}")
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            port = self._free_port()
+            launch_args: dict[str, Any] = dict(
+                user_data_dir=str(profile_dir),
+                headless=self._headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--remote-debugging-port={port}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-session-crashed-bubble",
+                    "--restore-last-session=false",
+                ],
+            )
+            try:
                 if self._executable_path:
-                    launch_kwargs["executable_path"] = self._executable_path
-                    self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                    launch_args["executable_path"] = self._executable_path
+                    self._context = await self._playwright.chromium.launch_persistent_context(
+                        **launch_args
+                    )
                 else:
                     try:
-                        launch_kwargs["channel"] = self._browser_channel
-                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-                    except Exception:
-                        launch_kwargs.pop("channel", None)
-                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-                self._context = await self._browser.new_context()
-                self._owns_browser = True
-                return
-
-            # ── Persistent profile: try numbered slots until one is free ──────
-            # Each client gets its own browser window so processes are fully
-            # independent — closing one does not affect any other.
-            base_dir = self._profile_dir
-            _MAX_SLOTS = 16
-            last_exc: Exception | None = None
-            for slot in range(_MAX_SLOTS):
-                profile_dir = base_dir if slot == 0 else Path(str(base_dir) + f"-{slot}")
-                profile_dir.mkdir(parents=True, exist_ok=True)
-                port = self._free_port()
-                launch_args: dict[str, Any] = dict(
-                    user_data_dir=str(profile_dir),
-                    headless=self._headless,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        f"--remote-debugging-port={port}",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--disable-session-crashed-bubble",
-                        "--restore-last-session=false",
-                    ],
-                )
-                try:
-                    if self._executable_path:
-                        launch_args["executable_path"] = self._executable_path
+                        launch_args["channel"] = self._browser_channel
                         self._context = await self._playwright.chromium.launch_persistent_context(
                             **launch_args
                         )
-                    else:
-                        try:
-                            launch_args["channel"] = self._browser_channel
-                            self._context = await self._playwright.chromium.launch_persistent_context(
-                                **launch_args
-                            )
-                        except Exception:
-                            launch_args.pop("channel", None)
-                            self._context = await self._playwright.chromium.launch_persistent_context(
-                                **launch_args
-                            )
-                except Exception as exc:
-                    log.info(
-                        "start: slot %d (%s) unavailable (%s) – trying next …",
-                        slot,
-                        profile_dir.name,
-                        exc,
-                    )
-                    last_exc = exc
-                    self._context = None
-                    continue
-
-                # ── Slot acquired ─────────────────────────────────────────────
-                # Update profile_dir so _port_file() / close() use the right path.
-                self._profile_dir = profile_dir
-                self._owns_browser = True
-                self._port_file().write_text(str(port))
+                    except Exception:
+                        launch_args.pop("channel", None)
+                        self._context = await self._playwright.chromium.launch_persistent_context(
+                            **launch_args
+                        )
+            except Exception as exc:
                 log.info(
-                    "start: launched browser in slot %d (profile=%s, port=%d)",
+                    "start: slot %d (%s) unavailable (%s) – trying next …",
                     slot,
                     profile_dir.name,
-                    port,
+                    exc,
                 )
-                await self._cleanup_startup_tabs()
-                return
+                last_exc = exc
+                self._context = None
+                continue
 
-            raise RuntimeError(
-                f"start: could not launch browser in any of {_MAX_SLOTS} profile slots; "
-                "all profile directories appear to be locked"
-            ) from last_exc
+            # Slot acquired – update profile_dir so _port_file() / close() use the right path.
+            self._profile_dir = profile_dir
+            self._owns_browser = True
+            self._port_file().write_text(str(port))
+            log.info(
+                "start: launched browser in slot %d (profile=%s, port=%d)",
+                slot,
+                profile_dir.name,
+                port,
+            )
+            await self._cleanup_startup_tabs()
+            return
+
+        raise RuntimeError(
+            f"start: could not launch browser in any of {_MAX_SLOTS} profile slots; "
+            "all profile directories appear to be locked"
+        ) from last_exc
 
     async def close(self) -> None:
         """Cancel background tasks and tear down the browser connection.
@@ -394,7 +399,6 @@ class TeamsClient:
         await self._require_context()
         url = self._resolve_url(channel_url)
 
-        # ── Page selection ────────────────────────────────────────────────────
         # Delegate to _acquire_page which reuses a Teams tab, recycles a blank
         # tab, or opens a fresh one — avoiding duplicate blank tabs.
         owns_page_out: list[bool] = [False]
@@ -404,10 +408,36 @@ class TeamsClient:
         if channel_name:
             await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
 
-        seen: set[str] = set()
+        seen = await self._prime_seen(page, include_existing, on_message)
 
-        # ── Priming phase ────────────────────────────────────────────────────
-        # Snapshot whatever is currently in the DOM right now — no waiting.
+        try:
+            await self._run_poll_loop(page, poll_interval, seen, on_message)
+        finally:
+            log.info("watch: loop ended%s", ", closing page" if owns_page else "")
+            if owns_page:
+                await page.close()
+
+    async def _prime_seen(
+        self,
+        page: Any,
+        include_existing: bool,
+        on_message: MessageHandler,
+    ) -> set[str]:
+        """Snapshot whatever is currently in the DOM and optionally forward messages.
+
+        Primes immediately on startup — no waiting for initial render.
+
+        Args:
+            page: The active Playwright page.
+            include_existing: When ``True``, each discovered message is forwarded
+                to *on_message*.
+            on_message: Callable invoked for each existing message when
+                *include_existing* is ``True``.
+
+        Returns:
+            A set of stable message IDs found during the priming pass.
+        """
+        seen: set[str] = set()
         try:
             initial_msgs = await scrape_top_level_messages(page)
         except Exception:
@@ -419,35 +449,45 @@ class TeamsClient:
                 if asyncio.iscoroutine(out):
                     await out
         log.info("watch: primed with %d existing message id(s)", len(seen))
+        return seen
 
-        # ── Poll loop ─────────────────────────────────────────────────────────
+    async def _run_poll_loop(
+        self,
+        page: Any,
+        poll_interval: float,
+        seen: set[str],
+        on_message: MessageHandler,
+    ) -> None:
+        """Continuously scrape the page and emit newly appeared messages.
+
+        Args:
+            page: The active Playwright page to scrape.
+            poll_interval: Seconds to sleep between successive scrape passes.
+            seen: Set of stable IDs already delivered; updated in-place.
+            on_message: Callable invoked for each new message.
+        """
         poll_count = 0
-        try:
-            while True:
-                await asyncio.sleep(poll_interval)
-                poll_count += 1
-                try:
-                    msgs = await scrape_top_level_messages(page)
-                    log.debug("watch: poll #%d – scraped %d messages", poll_count, len(msgs))
-                    new_count = 0
-                    for m in msgs:
-                        if m.stable_id in seen:
-                            continue
-                        seen.add(m.stable_id)
-                        new_count += 1
-                        out = on_message(m)
-                        if asyncio.iscoroutine(out):
-                            await out
-                    if new_count:
-                        log.info("watch: poll #%d delivered %d new message(s)", poll_count, new_count)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.warning("watch: poll #%d error (will retry): %s", poll_count, exc, exc_info=True)
-        finally:
-            log.info("watch: loop ended%s", ", closing page" if owns_page else "")
-            if owns_page:
-                await page.close()
+        while True:
+            await asyncio.sleep(poll_interval)
+            poll_count += 1
+            try:
+                msgs = await scrape_top_level_messages(page)
+                log.debug("watch: poll #%d – scraped %d messages", poll_count, len(msgs))
+                new_count = 0
+                for m in msgs:
+                    if m.stable_id in seen:
+                        continue
+                    seen.add(m.stable_id)
+                    new_count += 1
+                    out = on_message(m)
+                    if asyncio.iscoroutine(out):
+                        await out
+                if new_count:
+                    log.info("watch: poll #%d delivered %d new message(s)", poll_count, new_count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("watch: poll #%d error (will retry): %s", poll_count, exc, exc_info=True)
 
     _BLANK_URLS: frozenset[str] = frozenset(
         {"", "about:blank", "about:newtab", "chrome://newtab/", "edge://newtab/"}

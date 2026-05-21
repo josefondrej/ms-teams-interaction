@@ -750,7 +750,7 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
         Deduplicated list of :class:`~teams_interaction.types.ChannelMessage`
         instances in DOM order.
     """
-    # ── Fast path: one JS round-trip ─────────────────────────────────────
+    # --- Fast path: one JS round-trip ---
     try:
         js_msgs = await _scrape_messages_js(page, max_items=max_items)
     except Exception as exc:
@@ -762,7 +762,7 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
 
     log.debug("scrape(js): returned nothing – falling back to slow per-element path")
 
-    # ── Slow fallback path (original Playwright-per-element approach) ─────
+    # --- Slow fallback path (original Playwright-per-element approach) ---
     region_sel = None
     for s in sel.MESSAGE_LIST_REGION:
         loc = page.locator(s).first
