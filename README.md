@@ -140,7 +140,7 @@ If you installed `[cli]`:
 teams-interaction --help
 ```
 
-You should see subcommands `open`, `send`, and `watch`.
+You should see subcommands `open`, `send`, `watch`, and `chat`.
 
 ---
 
@@ -205,6 +205,37 @@ teams-interaction watch --channel 'General' --include-existing --interval 2
 teams-interaction open --url 'https://teams.microsoft.com/l/channel/...'
 teams-interaction send --url 'https://teams.microsoft.com/v2/' --channel 'General' --text 'Hello'
 ```
+
+### `chat` — interactive two-way chat session
+
+`chat` opens a persistent browser tab on the chosen channel and then runs interactively:
+
+- **Type a message** and press **Enter** — it is sent to Teams immediately.
+- **Incoming messages** from other participants appear on screen in real time (polled every `--interval` seconds).
+- Press **Ctrl+C** to quit and close the browser.
+
+```bash
+# Basic usage — replace the channel name with your DM contact or channel
+teams-interaction chat --channel 'Andreas Oberdammer'
+
+# A team channel works the same way
+teams-interaction chat --channel 'General'
+
+# Adjust the poll interval (seconds) and/or pass a deep-link URL
+teams-interaction chat --channel 'General' --interval 1
+teams-interaction chat --channel 'General' --url 'https://teams.microsoft.com/v2/'
+```
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--channel` | *(required)* | Visible channel or chat name to open |
+| `--url` | `https://teams.microsoft.com/v2/` | Custom Teams deep-link to navigate to first |
+| `--interval` | `2.0` | How often (in seconds) to poll for incoming messages |
+| `--verbose` / `-v` | off | Enable DEBUG logging to stderr |
+
+> **Tip:** The session uses your existing persistent browser profile, so you only need to sign in once (see the `open` command for the first-time sign-in flow). Existing messages visible at startup are silently recorded so they are not re-printed when the session begins.
 
 Or run the module:
 

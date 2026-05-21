@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import Browser, BrowserContext, async_playwright
 
 from teams_interaction.dom import (
     goto_channel,
@@ -53,9 +54,25 @@ class TeamsClient:
         self._executable_path = exe if exe else None
         self._headless = headless
         self._playwright: Any = None
+        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
+        self._owns_browser: bool = False
         self._tasks: list[asyncio.Task[Any]] = []
         self._run_guard = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _free_port() -> int:
+        """Return an ephemeral free TCP port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _port_file(self) -> Path:
+        return self._profile_dir / ".cdp-port"
 
     async def start(self) -> None:
         async with self._run_guard:
@@ -63,10 +80,39 @@ class TeamsClient:
                 return
             self._profile_dir.mkdir(parents=True, exist_ok=True)
             self._playwright = await async_playwright().start()
+
+            # ── Try to reuse an already-running browser instance ──────────────
+            port_file = self._port_file()
+            if port_file.exists():
+                try:
+                    port = int(port_file.read_text().strip())
+                    log.info("start: found CDP port %d – connecting to existing browser", port)
+                    self._browser = await self._playwright.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{port}"
+                    )
+                    # Persistent-context browsers expose their context as contexts[0]
+                    self._context = (
+                        self._browser.contexts[0]
+                        if self._browser.contexts
+                        else await self._browser.new_context()
+                    )
+                    self._owns_browser = False
+                    log.info("start: attached to existing browser (pid unknown, port=%d)", port)
+                    return
+                except Exception as exc:
+                    log.info("start: could not reuse existing browser (%s) – launching fresh", exc)
+                    port_file.unlink(missing_ok=True)
+                    self._browser = None
+
+            # ── Launch a brand-new browser and advertise its debug port ───────
+            port = self._free_port()
             base: dict[str, Any] = dict(
                 user_data_dir=str(self._profile_dir),
                 headless=self._headless,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--remote-debugging-port={port}",
+                ],
             )
             if self._executable_path:
                 base["executable_path"] = self._executable_path
@@ -79,6 +125,10 @@ class TeamsClient:
                     base.pop("channel", None)
                     self._context = await self._playwright.chromium.launch_persistent_context(**base)
 
+            self._owns_browser = True
+            port_file.write_text(str(port))
+            log.info("start: launched new browser, CDP port=%d written to %s", port, port_file)
+
     async def close(self) -> None:
         async with self._run_guard:
             for t in self._tasks:
@@ -87,8 +137,19 @@ class TeamsClient:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
             if self._context:
-                await self._context.close()
+                if self._owns_browser:
+                    # Closing the persistent context also closes the browser
+                    await self._context.close()
+                    self._port_file().unlink(missing_ok=True)
+                # If we only attached, leave the context/browser alive for other consumers
                 self._context = None
+            if self._browser and not self._owns_browser:
+                # Detach without killing the browser
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
             if self._playwright:
                 await self._playwright.stop()
                 self._playwright = None

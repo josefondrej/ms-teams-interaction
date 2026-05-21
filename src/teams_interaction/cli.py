@@ -157,5 +157,86 @@ def inspect(
     asyncio.run(run())
 
 
+@app.command()
+def chat(
+    channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to open"),
+    url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging to stderr"),
+) -> None:
+    """Interactively chat in a Teams channel: type messages to send."""
+    _setup_logging(logging.DEBUG if verbose else logging.INFO)
+
+    async def run() -> None:
+        client = TeamsClient()
+        await client.start()
+
+        # Open the channel on a persistent page that we keep alive
+        await client.open_channel(url, channel_name=channel)
+
+        # Retrieve the page that was just opened (last page in the context)
+        page = client._context.pages[-1]
+
+        from teams_interaction.dom import send_plain_text
+
+        typer.echo(
+            typer.style(f"Chatting in '{channel}'. Type a message and press Enter to send. Ctrl+C to quit.", fg=typer.colors.GREEN)
+        )
+
+        loop = asyncio.get_event_loop()
+
+        def _read_line() -> str:
+            return sys.stdin.readline()
+
+        input_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        async def stdin_reader() -> None:
+            """Read stdin lines in a thread and push them onto the queue."""
+            while True:
+                line = await loop.run_in_executor(None, _read_line)
+                if not line:  # EOF
+                    await input_queue.put("")
+                    return
+                await input_queue.put(line.rstrip("\n"))
+
+        async def sender() -> None:
+            """Read from the input queue and send messages to Teams."""
+            while True:
+                text = await input_queue.get()
+                if text == "":
+                    # EOF – stop
+                    raise SystemExit(0)
+                if text.strip():
+                    try:
+                        await send_plain_text(page, text)
+                        log.debug("chat: sent: %r", text)
+                    except Exception as exc:
+                        typer.echo(typer.style(f"[error sending: {exc}]", fg=typer.colors.RED), err=True)
+
+        stdin_task = asyncio.create_task(stdin_reader())
+        send_task = asyncio.create_task(sender())
+
+        try:
+            done, pending = await asyncio.wait(
+                [stdin_task, send_task],
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            for t in done:
+                exc = t.exception() if not t.cancelled() else None
+                if exc and not isinstance(exc, SystemExit):
+                    log.error("chat task error: %s", exc, exc_info=exc)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for t in (stdin_task, send_task):
+                t.cancel()
+            await asyncio.gather(stdin_task, send_task, return_exceptions=True)
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
     app()
