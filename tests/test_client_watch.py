@@ -41,6 +41,7 @@ class _FakeContext:
 
 def _make_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch ``goto_channel`` and ``switch_to_channel`` with async no-ops."""
+
     async def fake_noop(*_: Any, **__: Any) -> None:
         return None
 
@@ -225,4 +226,3 @@ async def test_watch_reuses_existing_teams_page_and_does_not_close_it(
     assert not teams_page.closed
     # new_page() must never have been called
     assert not new_page.closed
-

@@ -101,5 +101,3 @@ for (const item of items) {
     await switch_to_channel(page, "Josef Ondrej", timeout_ms=2000)
 
     assert await active_channel_name(page) == "Josef Ondrej"
-
-

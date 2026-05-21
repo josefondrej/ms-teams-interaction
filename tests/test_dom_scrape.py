@@ -89,5 +89,3 @@ async def test_scrape_top_level_messages_skips_multi_message_container(page: Pag
     msgs = await scrape_top_level_messages(page, max_items=10)
 
     assert [m.text for m in msgs] == ["First visible message", "Second visible message"]
-
-

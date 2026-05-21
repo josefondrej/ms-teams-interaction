@@ -68,7 +68,7 @@ CHANNEL_NAV_ITEM = [
     '[role="tab"]',
     '[role="listitem"]',
     '[role="link"]',
-    'button[aria-label]',
+    "button[aria-label]",
     '[data-tid*="channel"]',
     '[data-tid*="chat"]',
 ]

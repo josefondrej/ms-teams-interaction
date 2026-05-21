@@ -22,10 +22,10 @@ _DATE_SEP_RE = re.compile(
     r"today|yesterday|"
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"mon|tue|wed|thu|fri|sat|sun|"
-    r"\d{1,2}\s+\w+\s+\d{4}|"       # "21 May 2026"
-    r"\w+\s+\d{1,2},?\s+\d{4}|"     # "May 21, 2026"
-    r"\d{1,2}/\d{1,2}/\d{2,4}|"     # "5/21/26"
-    r"\d{4}-\d{2}-\d{2}"            # "2026-05-21"
+    r"\d{1,2}\s+\w+\s+\d{4}|"  # "21 May 2026"
+    r"\w+\s+\d{1,2},?\s+\d{4}|"  # "May 21, 2026"
+    r"\d{1,2}/\d{1,2}/\d{2,4}|"  # "5/21/26"
+    r"\d{4}-\d{2}-\d{2}"  # "2026-05-21"
     r")$",
     re.IGNORECASE,
 )
@@ -43,6 +43,7 @@ def _is_date_separator(text: str, author: str | None) -> bool:
     if "\n" in stripped or len(stripped) > 40:
         return False
     return bool(_DATE_SEP_RE.match(stripped))
+
 
 from playwright.async_api import Locator, Page
 
@@ -81,7 +82,6 @@ async def goto_channel(page: Page, url: str, timeout_ms: float = 30_000) -> None
     log.info("goto_channel: navigating to %s (timeout=%dms)", url, timeout_ms)
     await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     log.debug("goto_channel: page loaded (url=%s)", page.url)
-
 
 
 def _norm_text(value: str) -> str:
@@ -146,7 +146,7 @@ def _clean_message_text(text: str, author: str | None) -> str:
             candidate = m.group(1).strip()
             # strip leading author name if it snuck in
             if candidate.startswith(author):
-                candidate = candidate[len(author):].lstrip()
+                candidate = candidate[len(author) :].lstrip()
             return candidate
 
         # "real text by Author" – accessibility suffix on short messages
@@ -225,9 +225,7 @@ async def _wait_for_nav_ready(
                         return
         await page.wait_for_timeout(poll_ms)
 
-    raise TimeoutError(
-        f"Teams navigation pane did not show {min_items}+ items within {timeout_ms:.0f} ms"
-    )
+    raise TimeoutError(f"Teams navigation pane did not show {min_items}+ items within {timeout_ms:.0f} ms")
 
 
 async def _wait_for_loading_screen_gone(page: Page, timeout_ms: float = 30_000) -> None:
@@ -291,14 +289,13 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 3
             break
         log.info(
             "switch_to_channel: %r not found yet, retrying (%.0fs remaining)",
-            channel_name, remaining,
+            channel_name,
+            remaining,
         )
         await page.wait_for_timeout(min(retry_interval_ms, remaining * 1000))
 
     if item is None:
-        raise RuntimeError(
-            f"Could not find channel/chat '{channel_name}' in the Teams navigation pane"
-        )
+        raise RuntimeError(f"Could not find channel/chat '{channel_name}' in the Teams navigation pane")
 
     log.info("switch_to_channel: found nav item for %r, clicking", channel_name)
     remaining_ms = max(0.0, (deadline - time.monotonic()) * 1000)
@@ -314,12 +311,11 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 3
         except Exception as exc:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError(
-                    f"Timed out waiting to click nav item for '{channel_name}': {exc}"
-                ) from exc
+                raise RuntimeError(f"Timed out waiting to click nav item for '{channel_name}': {exc}") from exc
             log.info(
                 "switch_to_channel: click blocked (loading screen?), retrying (%.0fs remaining): %s",
-                remaining, exc,
+                remaining,
+                exc,
             )
             await _wait_for_loading_screen_gone(page, timeout_ms=min(5_000, remaining * 1000))
 
@@ -468,7 +464,7 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
                 best_loc = candidate
                 best_text = raw
                 if best_score == 3:
-                    break   # can't do better than exact
+                    break  # can't do better than exact
         if best_score == 3:
             break
 
@@ -477,7 +473,9 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
     else:
         log.info(
             "_find_channel_nav_item: best match score=%d text=%r for %r",
-            best_score, best_text[:80], channel_name,
+            best_score,
+            best_text[:80],
+            channel_name,
         )
     return best_loc
 
@@ -715,9 +713,7 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
         if mid:
             stable = f"mid:{mid}"
         else:
-            h = hashlib.sha256(
-                f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")
-            ).hexdigest()[:24]
+            h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
             stable = f"hash:{h}"
 
         if stable in seen:
@@ -1125,9 +1121,7 @@ async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: st
                 return f"mid:{mid}"
     except Exception:
         pass
-    h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
-        :24
-    ]
+    h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[:24]
     return f"hash:{h}"
 
 

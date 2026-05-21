@@ -182,20 +182,14 @@ class TeamsClient:
             try:
                 if self._executable_path:
                     launch_args["executable_path"] = self._executable_path
-                    self._context = await self._playwright.chromium.launch_persistent_context(
-                        **launch_args
-                    )
+                    self._context = await self._playwright.chromium.launch_persistent_context(**launch_args)
                 else:
                     try:
                         launch_args["channel"] = self._browser_channel
-                        self._context = await self._playwright.chromium.launch_persistent_context(
-                            **launch_args
-                        )
+                        self._context = await self._playwright.chromium.launch_persistent_context(**launch_args)
                     except Exception:
                         launch_args.pop("channel", None)
-                        self._context = await self._playwright.chromium.launch_persistent_context(
-                            **launch_args
-                        )
+                        self._context = await self._playwright.chromium.launch_persistent_context(**launch_args)
             except Exception as exc:
                 log.info(
                     "start: slot %d (%s) unavailable (%s) – trying next …",
@@ -489,10 +483,7 @@ class TeamsClient:
             except Exception as exc:
                 log.warning("watch: poll #%d error (will retry): %s", poll_count, exc, exc_info=True)
 
-    _BLANK_URLS: frozenset[str] = frozenset(
-        {"", "about:blank", "about:newtab", "chrome://newtab/", "edge://newtab/"}
-    )
-
+    _BLANK_URLS: frozenset[str] = frozenset({"", "about:blank", "about:newtab", "chrome://newtab/", "edge://newtab/"})
 
     async def _cleanup_startup_tabs(self) -> None:
         """Reduce the browser to a single usable tab after launch.
@@ -608,9 +599,7 @@ class TeamsClient:
             self._my_pages.add(p)
             return p
         except Exception as exc:
-            log.warning(
-                "_new_page: context.new_page() failed (%s) – using window.open fallback", exc
-            )
+            log.warning("_new_page: context.new_page() failed (%s) – using window.open fallback", exc)
             return await self._open_page_via_js()
 
     async def _open_page_via_js(self) -> Any:
@@ -628,9 +617,7 @@ class TeamsClient:
         """
         pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
         if not pages:
-            raise RuntimeError(
-                "_open_page_via_js: no open pages available to trigger window.open"
-            )
+            raise RuntimeError("_open_page_via_js: no open pages available to trigger window.open")
         async with self._context.expect_page() as page_info:  # type: ignore[union-attr]
             await pages[0].evaluate("() => window.open('about:blank', '_blank')")
         p = await page_info.value
@@ -659,4 +646,3 @@ class TeamsClient:
         if not channel_url:
             return DEFAULT_TEAMS_URL
         return normalize_teams_url(channel_url)
-
