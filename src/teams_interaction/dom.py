@@ -13,6 +13,11 @@ import re
 import time
 from typing import Any
 
+from playwright.async_api import Locator, Page
+
+from teams_interaction import selectors as sel
+from teams_interaction.types import ChannelMessage
+
 # ---------------------------------------------------------------------------
 # Teams date-divider detection
 # ---------------------------------------------------------------------------
@@ -44,11 +49,6 @@ def _is_date_separator(text: str, author: str | None) -> bool:
         return False
     return bool(_DATE_SEP_RE.match(stripped))
 
-
-from playwright.async_api import Locator, Page
-
-from teams_interaction import selectors as sel
-from teams_interaction.types import ChannelMessage
 
 log = logging.getLogger(__name__)
 
