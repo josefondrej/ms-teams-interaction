@@ -1,3 +1,5 @@
+"""Unit tests for :meth:`teams_interaction.client.TeamsClient._watch_channel_loop`."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,27 +12,35 @@ from teams_interaction.types import ChannelMessage
 
 
 class _FakePage:
+    """Minimal stub for a Playwright page used in watch-loop tests."""
+
     def __init__(self, url: str = "") -> None:
         self.url = url
         self.closed = False
 
     def is_closed(self) -> bool:
+        """Return whether the page has been closed."""
         return self.closed
 
     async def close(self) -> None:
+        """Mark the page as closed."""
         self.closed = True
 
 
 class _FakeContext:
+    """Minimal stub for a Playwright browser context used in watch-loop tests."""
+
     def __init__(self, page: _FakePage, existing_pages: list[_FakePage] | None = None) -> None:
         self._page = page
         self.pages: list[_FakePage] = existing_pages or []
 
     async def new_page(self) -> _FakePage:
+        """Return the pre-configured fake page."""
         return self._page
 
 
 def _make_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``goto_channel`` and ``switch_to_channel`` with async no-ops."""
     async def fake_noop(*_: Any, **__: Any) -> None:
         return None
 
@@ -40,6 +50,7 @@ def _make_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_watch_channel_does_not_emit_initial_batch_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``include_existing=False`` the priming batch is never forwarded to the handler."""
     page = _FakePage()
     client = TeamsClient()
     client._context = _FakeContext(page)  # type: ignore[assignment]
@@ -71,6 +82,7 @@ async def test_watch_channel_does_not_emit_initial_batch_by_default(monkeypatch:
 
 @pytest.mark.asyncio
 async def test_watch_channel_can_emit_initial_batch_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``include_existing=True`` the priming batch is forwarded to the handler."""
     page = _FakePage()
     client = TeamsClient()
     client._context = _FakeContext(page)  # type: ignore[assignment]

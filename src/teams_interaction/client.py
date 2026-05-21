@@ -1,3 +1,5 @@
+"""High-level async client for browser-driven Microsoft Teams interaction."""
+
 from __future__ import annotations
 
 import asyncio
@@ -41,6 +43,24 @@ class TeamsClient:
         executable_path: str | None = None,
         headless: bool = False,
     ) -> None:
+        """Initialise the client with browser configuration.
+
+        All parameters are keyword-only and fall back to environment variables
+        when ``None``.
+
+        Args:
+            profile_dir: Path to the persistent Chromium profile directory.
+                Defaults to ``$TEAMS_PROFILE_DIR`` or
+                ``~/.cache/ms-teams-interaction/browser-profile``.
+            browser_channel: Playwright browser channel (e.g. ``"msedge"``
+                or ``"chrome"``).  Defaults to ``$TEAMS_BROWSER_DIST``
+                (``"msedge"`` if unset).
+            executable_path: Absolute path to a custom browser binary.
+                Overrides *browser_channel*.  Defaults to
+                ``$TEAMS_BROWSER_EXECUTABLE``.
+            headless: Launch the browser in headless mode.  Defaults to
+                ``False`` (visible window, needed for Teams SSO).
+        """
         self._profile_dir = Path(
             profile_dir
             or os.environ.get(
@@ -71,9 +91,23 @@ class TeamsClient:
             return s.getsockname()[1]
 
     def _port_file(self) -> Path:
+        """Return the path of the file used to advertise the browser's CDP port.
+
+        Returns:
+            A :class:`~pathlib.Path` inside the profile directory.
+        """
         return self._profile_dir / ".cdp-port"
 
     async def start(self) -> None:
+        """Launch (or reattach to) the persistent browser and create a context.
+
+        If a ``.cdp-port`` file exists in the profile directory, attempts to
+        connect to an already-running browser over CDP.  On failure, or when
+        no port file exists, a fresh Chromium/Edge instance is launched with
+        the profile dir and the new CDP port is written to the port file.
+
+        This method is idempotent: calling it more than once is safe.
+        """
         async with self._run_guard:
             if self._context:
                 return
@@ -129,6 +163,13 @@ class TeamsClient:
             log.info("start: launched new browser, CDP port=%d written to %s", port, port_file)
 
     async def close(self) -> None:
+        """Cancel background tasks and tear down the browser connection.
+
+        If this client owns the browser (i.e. it launched it), the persistent
+        context is closed (which also closes the browser) and the port file is
+        removed.  If the client only attached to an existing browser, the
+        context and browser are left alive for other consumers.
+        """
         async with self._run_guard:
             for t in self._tasks:
                 t.cancel()
@@ -154,7 +195,17 @@ class TeamsClient:
                 self._playwright = None
 
     async def open_channel(self, channel_url: str | None = None, *, channel_name: str | None = None) -> None:
-        """Open Teams in a new tab and optionally switch to a channel by visible name."""
+        """Open Teams in a new tab and optionally switch to a channel by visible name.
+
+        Args:
+            channel_url: Full Teams URL to navigate to.  Falls back to
+                ``https://teams.microsoft.com/v2/`` when ``None``.
+            channel_name: Visible display name of the channel/chat to select
+                after loading.  Skipped when ``None``.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called yet.
+        """
         await self._require_context()
         url = self._resolve_url(channel_url)
         page = await self._context.new_page()
@@ -163,6 +214,21 @@ class TeamsClient:
             await switch_to_channel(page, channel_name)
 
     async def send_message(self, channel_url: str | None, text: str, *, channel_name: str | None = None) -> None:
+        """Open a channel, type *text* into the compose box, and send it.
+
+        A fresh page is opened for the operation and closed afterwards.
+
+        Args:
+            channel_url: Full Teams URL to navigate to.  Falls back to the
+                default Teams URL when ``None``.
+            text: Plain-text content to send.
+            channel_name: Optional visible channel/chat name to switch to after
+                loading the URL.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called yet, or if the
+                compose box cannot be found.
+        """
         await self._require_context()
         url = self._resolve_url(channel_url)
         page = await self._context.new_page()
@@ -181,6 +247,22 @@ class TeamsClient:
         channel_name: str | None = None,
         max_samples: int = 5,
     ) -> dict[str, Any]:
+        """Navigate to a channel and return a diagnostic DOM snapshot.
+
+        Args:
+            channel_url: Full Teams URL to navigate to.  Falls back to the
+                default Teams URL when ``None``.
+            channel_name: Optional visible channel/chat name to switch to.
+            max_samples: Maximum number of DOM sample nodes/messages to collect
+                per selector entry.
+
+        Returns:
+            The dictionary produced by
+            :func:`~teams_interaction.dom.inspect_message_dom`.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called yet.
+        """
         await self._require_context()
         url = self._resolve_url(channel_url)
         page = await self._context.new_page()
@@ -206,6 +288,19 @@ class TeamsClient:
 
         Primes immediately on startup (no waiting for initial render).
         IDs are best-effort (``data-mid`` when present, else a content hash).
+
+        Args:
+            channel_url: Full Teams URL to navigate to.  Falls back to the
+                default Teams URL when ``None``.
+            on_message: Async or sync callable invoked for each new message.
+            channel_name: Visible channel/chat name to switch to after loading.
+            include_existing: When ``True``, the messages already in the DOM at
+                startup are forwarded to *on_message*.
+            poll_interval: Seconds between successive DOM scrapes.
+
+        Returns:
+            The :class:`asyncio.Task` running the polling loop.  Cancel it (or
+            let the client close) to stop watching.
         """
         task = asyncio.create_task(
             self._watch_channel_loop(channel_url, on_message, poll_interval, channel_name, include_existing)
@@ -221,6 +316,20 @@ class TeamsClient:
         channel_name: str | None,
         include_existing: bool,
     ) -> None:
+        """Background coroutine that continuously scrapes and emits new messages.
+
+        Reuses an existing Teams page if one is already open; otherwise opens
+        a new page and owns its lifecycle.
+
+        Args:
+            channel_url: Full Teams URL to navigate to.
+            on_message: Callable invoked for every new
+                :class:`~teams_interaction.types.ChannelMessage`.
+            poll_interval: Seconds to sleep between scrape passes.
+            channel_name: Optional channel/chat name to select after loading.
+            include_existing: When ``True``, messages found during the priming
+                pass are forwarded to *on_message*.
+        """
         await self._require_context()
         url = self._resolve_url(channel_url)
 
@@ -294,10 +403,23 @@ class TeamsClient:
                 await page.close()
 
     async def _require_context(self) -> None:
+        """Raise ``RuntimeError`` if the browser context is not initialised.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called yet.
+        """
         if not self._context:
             raise RuntimeError("Call await client.start() first")
 
     def _resolve_url(self, channel_url: str | None) -> str:
+        """Return a validated Teams URL, defaulting to the Teams v2 root.
+
+        Args:
+            channel_url: A raw Teams URL, or ``None`` to use the default.
+
+        Returns:
+            A normalised ``https://teams.microsoft.com/…`` URL string.
+        """
         if not channel_url:
             return DEFAULT_TEAMS_URL
         return normalize_teams_url(channel_url)

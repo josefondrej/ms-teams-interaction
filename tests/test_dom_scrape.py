@@ -1,3 +1,5 @@
+"""Integration tests for :func:`teams_interaction.dom.scrape_top_level_messages`."""
+
 from __future__ import annotations
 
 from playwright.async_api import Page
@@ -6,6 +8,7 @@ from teams_interaction.dom import scrape_top_level_messages
 
 
 async def test_scrape_top_level_messages_minimal_fixture(page: Page) -> None:
+    """Two chat-pane items with ``data-mid`` are scraped with correct ids and text."""
     html = """<!DOCTYPE html>
 <html><body>
 <div role="main">
@@ -33,6 +36,7 @@ async def test_scrape_top_level_messages_minimal_fixture(page: Page) -> None:
 
 
 async def test_scrape_top_level_messages_dedupes_duplicate_mid(page: Page) -> None:
+    """Two items sharing the same ``data-mid`` are collapsed to a single message."""
     html = """<!DOCTYPE html>
 <html><body>
 <div role="main">
@@ -54,6 +58,7 @@ async def test_scrape_top_level_messages_dedupes_duplicate_mid(page: Page) -> No
 
 
 async def test_scrape_top_level_messages_fallback_body_nodes(page: Page) -> None:
+    """Scraper falls back to body-node pass when no standard item wrapper exists."""
     html = """<!DOCTYPE html>
 <html><body>
 <div id="unexpected-wrapper">
@@ -69,6 +74,7 @@ async def test_scrape_top_level_messages_fallback_body_nodes(page: Page) -> None
 
 
 async def test_scrape_top_level_messages_skips_multi_message_container(page: Page) -> None:
+    """An ``article`` containing multiple body ``dir=auto`` divs emits each as its own message."""
     html = """<!DOCTYPE html>
 <html><body>
 <div role="main">

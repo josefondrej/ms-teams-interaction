@@ -1,3 +1,5 @@
+"""Integration tests for channel switching in :mod:`teams_interaction.dom`."""
+
 from __future__ import annotations
 
 from playwright.async_api import Page
@@ -6,6 +8,7 @@ from teams_interaction.dom import active_channel_name, switch_to_channel
 
 
 async def test_switch_to_channel_uses_dom_state_not_url(page: Page) -> None:
+    """Clicking an ``Engineering`` treeitem updates the heading and marks it aria-selected."""
     html = """<!DOCTYPE html>
 <html><body>
 <div id="nav">
@@ -33,6 +36,7 @@ for (const item of items) {
 
 
 async def test_switch_to_channel_noop_if_already_active(page: Page) -> None:
+    """``switch_to_channel`` returns immediately when the target is already active."""
     html = """<!DOCTYPE html>
 <html><body>
 <div role="treeitem" aria-selected="true">General</div>
@@ -46,6 +50,7 @@ async def test_switch_to_channel_noop_if_already_active(page: Page) -> None:
 
 
 async def test_switch_to_channel_matches_aria_label_chat_entry(page: Page) -> None:
+    """``aria-label`` of a listitem is used as the display name for matching."""
     html = """<!DOCTYPE html>
 <html><body>
 <ul>
@@ -72,6 +77,7 @@ for (const item of items) {
 
 
 async def test_switch_to_channel_skips_self_profile_entry(page: Page) -> None:
+    """When searching for a name, self-profile entries containing ``(You)`` are skipped."""
     html = """<!DOCTYPE html>
 <html><body>
 <div id="nav">

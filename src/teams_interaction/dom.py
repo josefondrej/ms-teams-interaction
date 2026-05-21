@@ -1,3 +1,10 @@
+"""DOM interaction helpers for Microsoft Teams (browser-based, no Azure registration).
+
+Provides async functions built on top of Playwright for navigating channels,
+scraping messages, sending plain-text posts, and switching between channels via
+the Teams left-rail navigation.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -46,6 +53,16 @@ log = logging.getLogger(__name__)
 
 
 async def _visible(loc: Locator, timeout_ms: float = 500) -> bool:
+    """Return ``True`` if *loc* becomes visible within *timeout_ms* milliseconds.
+
+    Args:
+        loc: The Playwright :class:`~playwright.async_api.Locator` to probe.
+        timeout_ms: Maximum wait time in milliseconds before giving up.
+
+    Returns:
+        ``True`` when the element is visible; ``False`` on timeout or any
+        other error.
+    """
     try:
         await loc.wait_for(state="visible", timeout=timeout_ms)
         return True
@@ -54,6 +71,12 @@ async def _visible(loc: Locator, timeout_ms: float = 500) -> bool:
 
 
 async def goto_channel(page: Page, url: str) -> None:
+    """Navigate *page* to *url* and wait for the DOM to load.
+
+    Args:
+        page: The active Playwright page.
+        url: The Teams deep-link (or any URL) to navigate to.
+    """
     log.info("goto_channel: navigating to %s", url)
     await page.goto(url, wait_until="domcontentloaded")
     log.debug("goto_channel: page loaded (url=%s)", page.url)
@@ -61,10 +84,30 @@ async def goto_channel(page: Page, url: str) -> None:
 
 
 def _norm_text(value: str) -> str:
+    """Normalise *value* for case-insensitive, whitespace-collapsed comparison.
+
+    Args:
+        value: Raw string to normalise.
+
+    Returns:
+        Lower-cased string with consecutive whitespace collapsed to a single
+        space.
+    """
     return " ".join(value.casefold().split())
 
 
 def _looks_like_transcript_blob(value: str) -> bool:
+    """Return ``True`` when *value* resembles a multi-line meeting transcript.
+
+    Heuristic: more than 1 500 characters **or** more than 12 non-empty lines.
+
+    Args:
+        value: The candidate text to inspect.
+
+    Returns:
+        ``True`` if the text looks like a collapsed transcript blob that should
+        be skipped during scraping.
+    """
     text = value.strip()
     if not text:
         return False
@@ -75,6 +118,13 @@ def _looks_like_transcript_blob(value: str) -> bool:
 def _clean_message_text(text: str, author: str | None) -> str:
     """Remove Teams DOM artifacts where inner_text includes a truncated preview + accessibility
     text + full message, eg: ``{truncated}... by {Author} {Author} {real text}``.
+
+    Args:
+        text: Raw inner-text extracted from a message DOM node.
+        author: Display name of the message author, or ``None``.
+
+    Returns:
+        Cleaned message text with accessibility noise removed.
     """
     if not text:
         return text
@@ -105,6 +155,18 @@ def _clean_message_text(text: str, author: str | None) -> str:
 
 
 async def active_channel_name(page: Page) -> str | None:
+    """Return the visible heading/title of the currently active Teams channel.
+
+    Tries all :data:`~teams_interaction.selectors.ACTIVE_CHANNEL_TITLE`
+    selectors in order, then falls back to inspecting the nav rail for a
+    selected item.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+
+    Returns:
+        The channel title string, or ``None`` if it could not be determined.
+    """
     for s in sel.ACTIVE_CHANNEL_TITLE:
         nodes = page.locator(s)
         try:
@@ -135,6 +197,13 @@ async def _wait_for_nav_ready(
     Polls all CHANNEL_NAV_ITEM selectors every *poll_ms* milliseconds until the
     total number of visible items reaches *min_items*, or *timeout_ms* elapses.
 
+    Args:
+        page: The Playwright page showing the Teams web client.
+        min_items: Minimum number of visible nav items required before
+            returning.
+        timeout_ms: Maximum wait time in milliseconds.
+        poll_ms: Polling interval in milliseconds.
+
     Raises:
         TimeoutError: if the nav pane does not become ready within *timeout_ms*.
     """
@@ -161,6 +230,21 @@ async def _wait_for_nav_ready(
 
 
 async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 15000) -> None:
+    """Click the nav-rail entry for *channel_name* and wait for it to become active.
+
+    If the requested channel is already active the function returns immediately.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        channel_name: Visible display name of the target channel or chat.
+        timeout_ms: Maximum wait time (ms) for the channel to become active
+            after clicking.
+
+    Raises:
+        ValueError: If *channel_name* is empty.
+        RuntimeError: If the channel cannot be found in the navigation pane or
+            does not become active within *timeout_ms*.
+    """
     target = _norm_text(channel_name)
     if not target:
         raise ValueError("channel_name must not be empty")
@@ -191,6 +275,19 @@ async def _wait_for_channel_active(
     clicked_item: Locator | None = None,
     timeout_ms: float = 15000,
 ) -> None:
+    """Poll until the channel heading matches *channel_name_norm* or the item is selected.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        channel_name_norm: Normalised (lower-case, collapsed whitespace) channel
+            name returned by :func:`_norm_text`.
+        clicked_item: The nav locator that was clicked; used as a fallback
+            ``aria-selected`` check.
+        timeout_ms: Maximum wait time in milliseconds.
+
+    Raises:
+        RuntimeError: If the channel does not become active within *timeout_ms*.
+    """
     deadline = time.monotonic() + (timeout_ms / 1000.0)
     while time.monotonic() < deadline:
         if await _is_channel_active(page, channel_name_norm):
@@ -224,6 +321,14 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
 
     This avoids matching group-chat items like "Josef Ondrej, Santiago …"
     when looking for "Josef Ondrej".
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        channel_name: Visible display name of the target channel or chat.
+
+    Returns:
+        The best-matching :class:`~playwright.async_api.Locator`, or ``None``
+        if no match was found.
     """
     target = _norm_text(channel_name)
     wants_you_suffix = "(you)" in channel_name.casefold()
@@ -318,6 +423,18 @@ async def _find_channel_nav_item(page: Page, channel_name: str) -> Locator | Non
 
 
 async def _candidate_text(node: Locator) -> str:
+    """Extract all textual representations from a nav candidate node.
+
+    Combines ``inner_text``, ``aria-label``, ``title``, and ``data-tid``
+    attributes into a single newline-separated string.
+
+    Args:
+        node: A Playwright :class:`~playwright.async_api.Locator` for the
+            candidate element.
+
+    Returns:
+        Newline-joined string of all non-empty text values found on the node.
+    """
     values: list[str] = []
     try:
         values.append(await node.inner_text())
@@ -334,6 +451,17 @@ async def _candidate_text(node: Locator) -> str:
 
 
 async def _active_channel_nav_text(page: Page) -> str | None:
+    """Return the inner text of the currently selected nav-rail channel entry.
+
+    Looks for nav items carrying ``aria-selected='true'``,
+    ``aria-current='page'``, or ``data-tid*='active'``.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+
+    Returns:
+        The visible text of the selected nav entry, or ``None`` if not found.
+    """
     attrs = ["aria-selected='true'", "aria-current='page'", "data-tid*='active' i"]
     for s in sel.CHANNEL_NAV_ITEM:
         for attr in attrs:
@@ -356,6 +484,15 @@ async def _active_channel_nav_text(page: Page) -> str | None:
 
 
 async def _is_channel_active(page: Page, channel_name_norm: str) -> bool:
+    """Return ``True`` when the active channel heading or selected nav item matches *channel_name_norm*.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        channel_name_norm: Normalised channel name (output of :func:`_norm_text`).
+
+    Returns:
+        ``True`` if the channel is currently active.
+    """
     active_title = await active_channel_name(page)
     if active_title and channel_name_norm in _norm_text(active_title):
         return True
@@ -371,6 +508,14 @@ async def _scrape_messages_js(page: Page, max_items: int = 80) -> list[ChannelMe
 
     Returns a list of ChannelMessage objects on success, or None if JS scraping found nothing
     (so the caller can fall back to the slow Playwright-per-element path).
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        max_items: Maximum number of message items to extract.
+
+    Returns:
+        A list of :class:`~teams_interaction.types.ChannelMessage` objects, or
+        ``None`` when the JS pass found no messages.
     """
     result = await page.evaluate(
         """
@@ -536,6 +681,14 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
 
     Uses a fast single-JS-evaluation path first; falls back to the slower
     per-element Playwright path only when the JS pass returns nothing.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        max_items: Maximum number of unique messages to return.
+
+    Returns:
+        Deduplicated list of :class:`~teams_interaction.types.ChannelMessage`
+        instances in DOM order.
     """
     # ── Fast path: one JS round-trip ─────────────────────────────────────
     try:
@@ -603,7 +756,22 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
 
 
 async def inspect_message_dom(page: Page, max_samples: int = 5) -> dict[str, Any]:
-    """Collect a compact diagnostic snapshot of message-related DOM state."""
+    """Collect a compact diagnostic snapshot of message-related DOM state.
+
+    Iterates over all known region, item, and body selectors, recording counts
+    and text samples for each. Also injects a ``scraped_messages`` key with the
+    top *max_samples* messages from :func:`scrape_top_level_messages`.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        max_samples: Maximum number of sample DOM nodes/messages to include per
+            selector entry.
+
+    Returns:
+        A dictionary with keys ``url``, ``active_channel``,
+        ``message_regions``, ``message_items``, ``body_nodes``, and
+        ``scraped_messages``.
+    """
     result: dict[str, Any] = {
         "url": page.url,
         "active_channel": await active_channel_name(page),
@@ -679,7 +847,19 @@ async def inspect_message_dom(page: Page, max_samples: int = 5) -> dict[str, Any
 
 
 async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[ChannelMessage]:
-    """Fallback pass: scrape directly from message body nodes across the page."""
+    """Fallback pass: scrape directly from message body nodes across the page.
+
+    Used when neither the JS fast-path nor the item-selector pass yields any
+    messages.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        max_items: Maximum number of unique messages to return.
+
+    Returns:
+        List of :class:`~teams_interaction.types.ChannelMessage` instances,
+        deduplicated by normalised text.
+    """
     out: list[ChannelMessage] = []
     seen_text: set[str] = set()
 
@@ -742,6 +922,22 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
 
 
 async def _parse_message_item(item: Locator, item_sel: str, index: int) -> ChannelMessage | None:
+    """Parse a single message-item DOM node into a :class:`ChannelMessage`.
+
+    Attempts to extract the author via ``AUTHOR`` selectors (with ``aria-label``
+    fallback) and the body text via ``BODY`` selectors (with full item
+    inner-text fallback).
+
+    Args:
+        item: Playwright locator for the message-item root element.
+        item_sel: CSS selector string that matched *item* (stored in ``raw``).
+        index: Position of *item* within its parent locator (for logging).
+
+    Returns:
+        A :class:`~teams_interaction.types.ChannelMessage`, or ``None`` when
+        the item should be skipped (empty text, date-separator, multi-message
+        container, etc.).
+    """
     text_parts: list[str] = []
     author: str | None = None
 
@@ -827,6 +1023,22 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
 
 
 async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: str, author: str | None) -> str:
+    """Compute a stable deduplication ID for a message-item locator.
+
+    Prefers the ``data-mid`` attribute on the element (or any nested child).
+    Falls back to a SHA-256 content hash when ``data-mid`` is absent.
+
+    Args:
+        item: Playwright locator for the message-item root element.
+        item_sel: CSS selector string that matched *item* (kept for signature
+            symmetry).
+        index: Zero-based index of the item (kept for signature symmetry).
+        text: Visible message text used to compute the fallback hash.
+        author: Display name of the author (included in hash input).
+
+    Returns:
+        A string of the form ``"mid:<value>"`` or ``"hash:<hex-prefix>"``.
+    """
     # Check data-mid on the item itself first, then on any nested element.
     for locator in (item, item.locator("[data-mid]").first):
         try:
@@ -842,6 +1054,20 @@ async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: st
 
 
 async def send_plain_text(page: Page, text: str) -> None:
+    """Type *text* into the Teams compose box and submit it.
+
+    Locates the compose textbox using
+    :data:`~teams_interaction.selectors.COMPOSE` selectors, fills it with
+    *text*, then clicks the send button (or presses Enter as a fallback).
+
+    Args:
+        page: The Playwright page showing the Teams web client with an active
+            channel ready for input.
+        text: Plain-text message to send.
+
+    Raises:
+        RuntimeError: If no compose textbox can be found.
+    """
     box: Locator | None = None
     for s in sel.COMPOSE:
         loc = page.locator(s).first
@@ -868,6 +1094,18 @@ async def send_plain_text(page: Page, text: str) -> None:
 
 
 def normalize_teams_url(url: str) -> str:
+    """Validate and strip whitespace from a Teams channel URL.
+
+    Args:
+        url: Raw URL string, optionally surrounded by whitespace.
+
+    Returns:
+        The stripped URL.
+
+    Raises:
+        ValueError: If *url* does not contain ``teams.microsoft.com`` or does
+            not start with ``http``.
+    """
     u = url.strip()
     if "teams.microsoft.com" not in u:
         raise ValueError("channel url must be a teams.microsoft.com link")

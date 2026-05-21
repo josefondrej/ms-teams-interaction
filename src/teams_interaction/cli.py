@@ -1,3 +1,14 @@
+"""Command-line interface for ms-teams-interaction.
+
+Exposes five Typer commands:
+
+* ``open``    – open Teams in a persistent browser window.
+* ``send``    – send a plain-text message to a channel.
+* ``watch``   – stream new channel messages to stdout.
+* ``inspect`` – dump message-DOM diagnostics as JSON.
+* ``chat``    – interactively type and send messages.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +30,11 @@ _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 def _setup_logging(level: int = logging.WARNING) -> None:
+    """Configure a ``StreamHandler`` on ``stderr`` for the package logger.
+
+    Args:
+        level: The numeric logging level (e.g. ``logging.DEBUG``).
+    """
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"))
     for name in ("teams_interaction",):
@@ -29,6 +45,16 @@ def _setup_logging(level: int = logging.WARNING) -> None:
 
 
 def _resolve_level(log_level: str, verbose: bool) -> int:
+    """Resolve the effective logging level from CLI flags.
+
+    Args:
+        log_level: String level name (e.g. ``"WARNING"``).
+        verbose: When ``True``, returns ``logging.DEBUG`` regardless of
+            *log_level*.
+
+    Returns:
+        An integer logging level suitable for :func:`logging.Logger.setLevel`.
+    """
     if verbose:
         return logging.DEBUG
     return getattr(logging, log_level.upper(), logging.WARNING)
@@ -205,7 +231,7 @@ def chat(
         input_queue: asyncio.Queue[str] = asyncio.Queue()
 
         async def stdin_reader() -> None:
-            """Read stdin lines in a thread and push them onto the queue."""
+            """Read stdin lines in a thread and push them onto the input queue."""
             while True:
                 line = await loop.run_in_executor(None, _read_line)
                 if not line:  # EOF

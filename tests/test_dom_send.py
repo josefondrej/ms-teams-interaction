@@ -1,3 +1,5 @@
+"""Integration tests for :func:`teams_interaction.dom.send_plain_text`."""
+
 from __future__ import annotations
 
 from playwright.async_api import Page
@@ -6,6 +8,7 @@ from teams_interaction.dom import send_plain_text
 
 
 async def test_send_plain_text_finds_compose_and_send(page: Page) -> None:
+    """Compose box is filled and the send button clicked when both are present."""
     html = """<!DOCTYPE html>
 <html><body>
 <div data-tid="ckeditor"><div role="textbox" contenteditable="true"></div></div>
