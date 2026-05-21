@@ -197,6 +197,7 @@ async def test_watch_reuses_existing_teams_page_and_does_not_close_it(
 
     client = TeamsClient()
     client._context = _FakeContext(new_page, existing_pages=[teams_page])  # type: ignore[assignment]
+    client._my_pages = {teams_page}  # tell the client it owns this page
 
     msg = ChannelMessage(stable_id="mid:1", text="hello", author="A")
     scrape_calls = 0

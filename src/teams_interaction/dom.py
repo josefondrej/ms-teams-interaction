@@ -189,7 +189,7 @@ async def active_channel_name(page: Page) -> str | None:
 
 async def _wait_for_nav_ready(
     page: Page,
-    min_items: int = 3,
+    min_items: int = 1,
     timeout_ms: float = 10_000,
     poll_ms: float = 250,
 ) -> None:
@@ -765,8 +765,13 @@ async def scrape_top_level_messages(page: Page, max_items: int = 80) -> list[Cha
     # --- Slow fallback path (original Playwright-per-element approach) ---
     region_sel = None
     for s in sel.MESSAGE_LIST_REGION:
-        loc = page.locator(s).first
-        if await _visible(loc, timeout_ms=800):
+        loc = page.locator(s)
+        try:
+            if await loc.count() == 0:
+                continue
+        except Exception:
+            continue
+        if await _visible(loc.first, timeout_ms=200):
             region_sel = s
             log.debug("scrape: message list region matched by %r", s)
             break
@@ -959,11 +964,12 @@ async def _scrape_messages_from_body_nodes(page: Page, max_items: int) -> list[C
             stable_prefix = "hash"
             stable_value = ""
             try:
-                wrapper = node.locator("xpath=ancestor-or-self::*[@data-mid][1]").first
-                mid = await wrapper.get_attribute("data-mid")
-                if mid:
-                    stable_prefix = "mid"
-                    stable_value = mid
+                wrapper_loc = node.locator("xpath=ancestor-or-self::*[@data-mid][1]")
+                if await wrapper_loc.count() > 0:
+                    mid = await wrapper_loc.first.get_attribute("data-mid")
+                    if mid:
+                        stable_prefix = "mid"
+                        stable_value = mid
             except Exception:
                 pass
             if not stable_value:
@@ -1002,8 +1008,13 @@ async def _parse_message_item(item: Locator, item_sel: str, index: int) -> Chann
     author: str | None = None
 
     for a in sel.AUTHOR:
-        al = item.locator(a).first
-        if await _visible(al, timeout_ms=150):
+        al = item.locator(a)
+        try:
+            if await al.count() == 0:
+                continue
+        except Exception:
+            continue
+        if await _visible(al.first, timeout_ms=150):
             try:
                 t = (await al.inner_text()).strip()
                 if t:
@@ -1100,13 +1111,20 @@ async def _stable_id_for_item(item: Locator, item_sel: str, index: int, text: st
         A string of the form ``"mid:<value>"`` or ``"hash:<hex-prefix>"``.
     """
     # Check data-mid on the item itself first, then on any nested element.
-    for locator in (item, item.locator("[data-mid]").first):
-        try:
-            mid = await locator.get_attribute("data-mid")
+    try:
+        mid = await item.get_attribute("data-mid")
+        if mid:
+            return f"mid:{mid}"
+    except Exception:
+        pass
+    try:
+        child_loc = item.locator("[data-mid]")
+        if await child_loc.count() > 0:
+            mid = await child_loc.first.get_attribute("data-mid")
             if mid:
                 return f"mid:{mid}"
-        except Exception:
-            pass
+    except Exception:
+        pass
     h = hashlib.sha256(f"{author or ''}|{text[:500]}".encode("utf-8", errors="ignore")).hexdigest()[
         :24
     ]
@@ -1150,7 +1168,6 @@ async def send_plain_text(page: Page, text: str) -> None:
             break
     if not clicked:
         await page.keyboard.press("Enter")
-    await page.wait_for_timeout(500)
 
 
 def normalize_teams_url(url: str) -> str:
