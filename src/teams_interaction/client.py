@@ -165,6 +165,7 @@ class TeamsClient:
                         else await self._browser.new_context()
                     )
                     self._owns_browser = False
+                    await self._close_non_teams_tabs()
                     log.info("start: attached to existing browser (pid unknown, port=%d)", port)
                     return
                 except Exception as exc:
@@ -187,20 +188,42 @@ class TeamsClient:
                     "--restore-last-session=false",
                 ],
             )
-            if self._executable_path:
-                base["executable_path"] = self._executable_path
-                self._context = await self._playwright.chromium.launch_persistent_context(**base)
-            else:
-                try:
-                    base["channel"] = self._browser_channel
+            launch_ok = False
+            try:
+                if self._executable_path:
+                    base["executable_path"] = self._executable_path
                     self._context = await self._playwright.chromium.launch_persistent_context(**base)
-                except Exception:
-                    base.pop("channel", None)
-                    self._context = await self._playwright.chromium.launch_persistent_context(**base)
+                else:
+                    try:
+                        base["channel"] = self._browser_channel
+                        self._context = await self._playwright.chromium.launch_persistent_context(**base)
+                    except Exception:
+                        base.pop("channel", None)
+                        self._context = await self._playwright.chromium.launch_persistent_context(**base)
+                launch_ok = True
+            except Exception as launch_exc:
+                # The profile directory may be locked by another process that has
+                # not yet written its port file (race condition) or whose port file
+                # we could not connect to earlier.  Poll for the port file and try
+                # CDP-attach before giving up.
+                log.info(
+                    "start: launch_persistent_context failed (%s) – "
+                    "waiting for another process to advertise its CDP port …",
+                    launch_exc,
+                )
+                attached = await self._wait_and_attach_cdp(port_file, timeout=30.0)
+                if not attached:
+                    raise
 
-            self._owns_browser = True
-            port_file.write_text(str(port))
-            log.info("start: launched new browser, CDP port=%d written to %s", port, port_file)
+            if self._context is None:
+                # Should not happen, but guard against it.
+                raise RuntimeError("start: browser context is None after launch/attach")
+
+            if launch_ok:
+                self._owns_browser = True
+                port_file.write_text(str(port))
+                log.info("start: launched new browser, CDP port=%d written to %s", port, port_file)
+            await self._close_non_teams_tabs()
 
     async def close(self) -> None:
         """Cancel background tasks and tear down the browser connection.
@@ -260,17 +283,8 @@ class TeamsClient:
         await self._require_context()
         url = self._resolve_url(channel_url)
 
-        # Reuse an existing Teams tab if one is already open, otherwise open a new one
-        page = None
-        for p in list(self._context.pages):
-            if not p.is_closed() and "teams.microsoft.com" in p.url:
-                page = p
-                log.info("open_channel: reusing existing Teams page (url=%s)", p.url)
-                break
-        if page is None:
-            page = await self._context.new_page()
-            log.info("open_channel: opening new page, url=%s", url)
-            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+        owns_page_out: list[bool] = [False]
+        page = await self._acquire_page(url, owns_page_out=owns_page_out)
 
         if channel_name:
             await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
@@ -396,25 +410,11 @@ class TeamsClient:
         url = self._resolve_url(channel_url)
 
         # ── Page selection ────────────────────────────────────────────────────
-        # Prefer an already-loaded Teams page so that running watch alongside
-        # 'chat' (or any other command that keeps a tab alive) doesn't force a
-        # cold Teams load in a brand-new tab.
-        owns_page = False
-        page = None
-        try:
-            for p in list(self._context.pages):
-                if not p.is_closed() and "teams.microsoft.com" in p.url:
-                    page = p
-                    log.info("watch: reusing existing Teams page (url=%s)", p.url)
-                    break
-        except Exception:
-            pass
-
-        if page is None:
-            page = await self._context.new_page()
-            owns_page = True
-            log.info("watch: opening new page, url=%s channel=%r", url, channel_name)
-            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+        # Delegate to _acquire_page which reuses a Teams tab, recycles a blank
+        # tab, or opens a fresh one — avoiding duplicate blank tabs.
+        owns_page_out: list[bool] = [False]
+        page = await self._acquire_page(url, owns_page_out=owns_page_out)
+        owns_page = owns_page_out[0]
 
         if channel_name:
             await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
@@ -463,6 +463,113 @@ class TeamsClient:
             log.info("watch: loop ended%s", ", closing page" if owns_page else "")
             if owns_page:
                 await page.close()
+
+    _BLANK_URLS: frozenset[str] = frozenset(
+        {"", "about:blank", "about:newtab", "chrome://newtab/", "edge://newtab/"}
+    )
+
+    async def _wait_and_attach_cdp(self, port_file: Path, *, timeout: float = 30.0) -> bool:
+        """Poll *port_file* until another process writes a CDP port, then attach.
+
+        Used as a fallback when ``launch_persistent_context`` fails because the
+        profile directory is already locked by a sibling CLI process.  Waits up
+        to *timeout* seconds for the port file to appear / become readable, then
+        connects via CDP and populates ``self._browser`` / ``self._context``.
+
+        Args:
+            port_file: Path to the ``.cdp-port`` file to watch.
+            timeout: Maximum number of seconds to wait.
+
+        Returns:
+            ``True`` when the attachment succeeded, ``False`` when it timed out
+            or every connection attempt failed.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        poll_interval = 0.25
+        last_port: int | None = None
+        log.info("_wait_and_attach_cdp: polling %s for up to %.0fs …", port_file, timeout)
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                if port_file.exists():
+                    port = int(port_file.read_text().strip())
+                    if port != last_port:
+                        last_port = port
+                        log.info("_wait_and_attach_cdp: found port %d – trying CDP …", port)
+                    try:
+                        self._browser = await self._playwright.chromium.connect_over_cdp(
+                            f"http://127.0.0.1:{port}"
+                        )
+                        self._context = (
+                            self._browser.contexts[0]
+                            if self._browser.contexts
+                            else await self._browser.new_context()
+                        )
+                        self._owns_browser = False
+                        log.info("_wait_and_attach_cdp: attached to existing browser on port %d", port)
+                        return True
+                    except Exception as exc:
+                        log.debug("_wait_and_attach_cdp: connect attempt failed (%s), retrying …", exc)
+            except Exception as exc:
+                log.debug("_wait_and_attach_cdp: error reading port file (%s), retrying …", exc)
+            await asyncio.sleep(poll_interval)
+        log.warning("_wait_and_attach_cdp: timed out after %.0fs", timeout)
+        return False
+
+    async def _close_non_teams_tabs(self) -> None:
+        """Close all blank / stale tabs that are not a Teams page.
+
+        Called after launching or reattaching to the persistent browser so that
+        blank tabs created automatically by the browser (or left over from a
+        previous session) are cleaned up.  Only tabs whose URL is in the
+        well-known blank-URL set are closed; any other non-Teams URL is left
+        alone to avoid accidentally closing something the user cares about.
+        """
+        if not self._context:
+            return
+        for page in list(self._context.pages):
+            if page.is_closed():
+                continue
+            if "teams.microsoft.com" not in page.url and page.url in self._BLANK_URLS:
+                log.info("start: closing blank tab (url=%r)", page.url)
+                try:
+                    await page.close()
+                except Exception as exc:
+                    log.debug("start: could not close blank tab: %s", exc)
+
+    async def _acquire_page(self, url: str, *, owns_page_out: list[bool]) -> Any:
+        """Return a page suitable for Teams interaction.
+
+        Strategy (in order):
+
+        1. Reuse an existing Teams tab — no navigation needed.
+        2. Reuse an existing blank/newtab — navigate it to *url* instead of
+           spawning a second blank tab alongside it.
+        3. Open a brand-new page and navigate it to *url*.
+
+        *owns_page_out* is a single-element list used as an out-parameter; it
+        is set to ``[True]`` when the caller should close the page after use,
+        and ``[False]`` when an already-open Teams page was reused.
+        """
+        pages = [p for p in self._context.pages if not p.is_closed()]  # type: ignore[union-attr]
+
+        for p in pages:
+            if "teams.microsoft.com" in p.url:
+                log.info("_acquire_page: reusing existing Teams page (url=%s)", p.url)
+                owns_page_out[0] = False
+                return p
+
+        for p in pages:
+            if p.url in self._BLANK_URLS:
+                log.info("_acquire_page: reusing blank tab, navigating to %s", url)
+                owns_page_out[0] = True
+                await goto_channel(p, url, timeout_ms=self._nav_timeout_ms)
+                return p
+
+        log.info("_acquire_page: opening new page, url=%s", url)
+        p = await self._context.new_page()  # type: ignore[union-attr]
+        owns_page_out[0] = True
+        await goto_channel(p, url, timeout_ms=self._nav_timeout_ms)
+        return p
 
     async def _require_context(self) -> None:
         """Raise ``RuntimeError`` if the browser context is not initialised.
