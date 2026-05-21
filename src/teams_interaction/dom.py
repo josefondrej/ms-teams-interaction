@@ -146,7 +146,7 @@ def _clean_message_text(text: str, author: str | None) -> str:
             candidate = match.group(1).strip()
             # strip leading author name if it snuck in
             if candidate.startswith(author):
-                candidate = candidate[len(author):].lstrip()
+                candidate = candidate[len(author) :].lstrip()
             return candidate
 
         # "real text by Author" – accessibility suffix on short messages
@@ -188,10 +188,10 @@ async def active_channel_name(page: Page) -> str | None:
 
 
 async def _wait_for_nav_ready(
-        page: Page,
-        min_items: int = 1,
-        timeout_ms: float = 10_000,
-        poll_ms: float = 250,
+    page: Page,
+    min_items: int = 1,
+    timeout_ms: float = 10_000,
+    poll_ms: float = 250,
 ) -> None:
     """Wait until the Teams navigation pane has rendered enough channel/chat entries.
 
@@ -326,10 +326,10 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 3
 
 
 async def _wait_for_channel_active(
-        page: Page,
-        channel_name_norm: str,
-        clicked_item: Locator | None = None,
-        timeout_ms: float = 15000,
+    page: Page,
+    channel_name_norm: str,
+    clicked_item: Locator | None = None,
+    timeout_ms: float = 15000,
 ) -> None:
     """Poll until the channel heading matches *channel_name_norm* or the item is selected.
 

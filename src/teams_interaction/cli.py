@@ -62,17 +62,17 @@ def _resolve_level(log_level: str, verbose: bool) -> int:
 
 @app.command("open")
 def open_channel_cmd(
-        url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
-        channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select after load"),
-        no_persistent: bool = typer.Option(
-            False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
-        ),
-        verbose: bool = typer.Option(
-            False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
-        ),
-        log_level: str = typer.Option(
-            "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL", show_choices=True
-        ),
+    url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select after load"),
+    no_persistent: bool = typer.Option(
+        False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
+    ),
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL", show_choices=True
+    ),
 ) -> None:
     """Open Teams in a persistent browser profile (sign in if needed)."""
     _setup_logging(_resolve_level(log_level, verbose))
@@ -96,18 +96,18 @@ def open_channel_cmd(
 
 @app.command()
 def send(
-        url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
-        channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select before sending"),
-        text: str = typer.Option(..., "--text"),
-        no_persistent: bool = typer.Option(
-            False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
-        ),
-        verbose: bool = typer.Option(
-            False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
-        ),
-        log_level: str = typer.Option(
-            "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
-        ),
+    url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select before sending"),
+    text: str = typer.Option(..., "--text"),
+    no_persistent: bool = typer.Option(
+        False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
+    ),
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    ),
 ) -> None:
     """Send a plain-text message to a channel."""
     _setup_logging(_resolve_level(log_level, verbose))
@@ -125,22 +125,22 @@ def send(
 
 @app.command()
 def watch(
-        channel: str = typer.Option(..., "--channel", help="Visible channel name to watch"),
-        include_existing: bool = typer.Option(
-            False,
-            "--include-existing",
-            help="Emit currently visible messages before polling for new ones",
-        ),
-        interval: float = typer.Option(0.25, "--interval", help="Poll interval in seconds"),
-        no_persistent: bool = typer.Option(
-            False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
-        ),
-        verbose: bool = typer.Option(
-            False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
-        ),
-        log_level: str = typer.Option(
-            "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
-        ),
+    channel: str = typer.Option(..., "--channel", help="Visible channel name to watch"),
+    include_existing: bool = typer.Option(
+        False,
+        "--include-existing",
+        help="Emit currently visible messages before polling for new ones",
+    ),
+    interval: float = typer.Option(0.25, "--interval", help="Poll interval in seconds"),
+    no_persistent: bool = typer.Option(
+        False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
+    ),
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    ),
 ) -> None:
     """Print new channel messages as they appear (navigates to Teams and selects the channel by name)."""
     _setup_logging(_resolve_level(log_level, verbose))
@@ -190,19 +190,19 @@ def watch(
 
 @app.command()
 def inspect(
-        channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to inspect"),
-        url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
-        samples: int = typer.Option(5, "--samples", min=1, max=20, help="How many sample DOM nodes/messages to print"),
-        out: Path | None = typer.Option(None, "--out", help="Optional path to write the JSON snapshot"),
-        no_persistent: bool = typer.Option(
-            False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
-        ),
-        verbose: bool = typer.Option(
-            False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
-        ),
-        log_level: str = typer.Option(
-            "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
-        ),
+    channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to inspect"),
+    url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    samples: int = typer.Option(5, "--samples", min=1, max=20, help="How many sample DOM nodes/messages to print"),
+    out: Path | None = typer.Option(None, "--out", help="Optional path to write the JSON snapshot"),
+    no_persistent: bool = typer.Option(
+        False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
+    ),
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    ),
 ) -> None:
     """Open Teams, switch to a chat/channel, and dump message-related DOM diagnostics as JSON."""
     _setup_logging(_resolve_level(log_level, verbose))
@@ -225,17 +225,17 @@ def inspect(
 
 @app.command()
 def chat(
-        channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to open"),
-        url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
-        no_persistent: bool = typer.Option(
-            False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
-        ),
-        verbose: bool = typer.Option(
-            False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
-        ),
-        log_level: str = typer.Option(
-            "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
-        ),
+    channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to open"),
+    url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    no_persistent: bool = typer.Option(
+        False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"
+    ),
+    log_level: str = typer.Option(
+        "WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    ),
 ) -> None:
     """Interactively chat in a Teams channel: type messages to send."""
     _setup_logging(_resolve_level(log_level, verbose))

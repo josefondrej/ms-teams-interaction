@@ -240,7 +240,9 @@ teams-interaction chat --channel 'General' --url 'https://teams.microsoft.com/v2
 |--------------------|-----------------------------------|---------------------------------------------|
 | `--channel`        | *(required)*                      | Visible channel or chat name to open        |
 | `--url`            | `https://teams.microsoft.com/v2/` | Custom Teams deep-link to navigate to first |
+| `--no-persistent`  | off                               | Launch a fresh browser (no saved profile; you will need to sign in) |
 | `--verbose` / `-v` | off                               | Enable DEBUG logging to stderr              |
+| `--log-level` / `-l` | `WARNING`                       | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 > **Tip:** The session uses your existing persistent browser profile, so you only need to sign in once (see the `open`
 > command for the first-time sign-in flow). Existing messages visible at startup are silently recorded so they are not
@@ -258,7 +260,9 @@ separate `chat` session.
 | `--channel`          | *(required)* | Visible channel or chat name to watch           |
 | `--include-existing` | off          | Also print messages already visible at startup  |
 | `--interval`         | `0.25`       | How often (in seconds) to poll for new messages |
+| `--no-persistent`    | off          | Launch a fresh browser (no saved profile; you will need to sign in) |
 | `--verbose` / `-v`   | off          | Enable DEBUG logging to stderr                  |
+| `--log-level` / `-l` | `WARNING`    | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 ### `inspect` — dump DOM diagnostics
 
@@ -278,7 +282,9 @@ teams-interaction inspect --channel 'General' --samples 10 --out snapshot.json
 | `--url`            | `https://teams.microsoft.com/v2/` | Custom Teams deep-link to navigate to first           |
 | `--samples`        | `5`                               | Number of sample DOM nodes/messages to include (1–20) |
 | `--out`            | *(stdout)*                        | Optional path to write the JSON snapshot              |
+| `--no-persistent`  | off                               | Launch a fresh browser (no saved profile; you will need to sign in) |
 | `--verbose` / `-v` | off                               | Enable DEBUG logging to stderr                        |
+| `--log-level` / `-l` | `WARNING`                       | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 ---
 
@@ -314,7 +320,7 @@ python -m teams_interaction.cli --help
 - **`playwright: command not found`** — Use `python -m playwright install chromium` from the same venv where you
   installed the package.
 - **`BrowserType.launch_persistent_context: Executable doesn't exist`** — Run the matching `playwright install …` for
-  your `TEAMS_BROWSER_CHANNEL`, or set `TEAMS_BROWSER_EXECUTABLE` to a valid binary.
+  your `TEAMS_BROWSER_DIST`, or set `TEAMS_BROWSER_EXECUTABLE` to a valid binary.
 - **Proxy / corporate TLS** — Configure `pip` and system trust as for any Python project; Playwright browser downloads
   may need `HTTPS_PROXY` or an internal mirror per Playwright docs.
 - **`ModuleNotFoundError: teams_interaction`** — Ensure the venv is activated and `pip install -e .` succeeded from the
