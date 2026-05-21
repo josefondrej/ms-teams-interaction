@@ -70,15 +70,16 @@ async def _visible(loc: Locator, timeout_ms: float = 500) -> bool:
         return False
 
 
-async def goto_channel(page: Page, url: str) -> None:
+async def goto_channel(page: Page, url: str, timeout_ms: float = 30_000) -> None:
     """Navigate *page* to *url* and wait for the DOM to load.
 
     Args:
         page: The active Playwright page.
         url: The Teams deep-link (or any URL) to navigate to.
+        timeout_ms: Maximum wait time in milliseconds for the navigation.
     """
-    log.info("goto_channel: navigating to %s", url)
-    await page.goto(url, wait_until="domcontentloaded")
+    log.info("goto_channel: navigating to %s (timeout=%dms)", url, timeout_ms)
+    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     log.debug("goto_channel: page loaded (url=%s)", page.url)
 
 
@@ -229,7 +230,27 @@ async def _wait_for_nav_ready(
     )
 
 
-async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 15000) -> None:
+async def _wait_for_loading_screen_gone(page: Page, timeout_ms: float = 30_000) -> None:
+    """Wait until the Teams full-page loading overlay (#loading-screen) is gone.
+
+    The loading screen intercepts pointer events and must be dismissed before
+    any click can land.  Silently returns if it is already absent.
+
+    Args:
+        page: The Playwright page showing the Teams web client.
+        timeout_ms: Maximum wait time in milliseconds.
+    """
+    try:
+        overlay = page.locator("#loading-screen")
+        # If it's not even present, this resolves immediately.
+        await overlay.wait_for(state="hidden", timeout=timeout_ms)
+        log.debug("_wait_for_loading_screen_gone: loading overlay gone")
+    except Exception:
+        # Either it was never there or timed out – either way, proceed.
+        pass
+
+
+async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 30_000) -> None:
     """Click the nav-rail entry for *channel_name* and wait for it to become active.
 
     If the requested channel is already active the function returns immediately.
@@ -254,17 +275,56 @@ async def switch_to_channel(page: Page, channel_name: str, timeout_ms: float = 1
         log.info("switch_to_channel: %r already active", channel_name)
         return
 
-    await _wait_for_nav_ready(page)
-    item = await _find_channel_nav_item(page, channel_name)
+    await _wait_for_nav_ready(page, timeout_ms=timeout_ms)
+
+    # Retry finding the nav item until the full timeout expires – the nav rail
+    # may still be loading contacts/chats even after the minimum item count is reached.
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    retry_interval_ms = 1_000
+    item = None
+    while True:
+        item = await _find_channel_nav_item(page, channel_name)
+        if item is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        log.info(
+            "switch_to_channel: %r not found yet, retrying (%.0fs remaining)",
+            channel_name, remaining,
+        )
+        await page.wait_for_timeout(min(retry_interval_ms, remaining * 1000))
+
     if item is None:
         raise RuntimeError(
             f"Could not find channel/chat '{channel_name}' in the Teams navigation pane"
         )
 
     log.info("switch_to_channel: found nav item for %r, clicking", channel_name)
+    remaining_ms = max(0.0, (deadline - time.monotonic()) * 1000)
+    await _wait_for_loading_screen_gone(page, timeout_ms=remaining_ms)
     await item.scroll_into_view_if_needed()
-    await item.click()
-    await _wait_for_channel_active(page, target, item, timeout_ms=timeout_ms)
+
+    # Retry the click until the loading overlay is gone and the click lands.
+    while True:
+        remaining_ms = max(1.0, (deadline - time.monotonic()) * 1000)
+        try:
+            await item.click(timeout=remaining_ms)
+            break
+        except Exception as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Timed out waiting to click nav item for '{channel_name}': {exc}"
+                ) from exc
+            log.info(
+                "switch_to_channel: click blocked (loading screen?), retrying (%.0fs remaining): %s",
+                remaining, exc,
+            )
+            await _wait_for_loading_screen_gone(page, timeout_ms=min(5_000, remaining * 1000))
+
+    remaining_ms = max(1.0, (deadline - time.monotonic()) * 1000)
+    await _wait_for_channel_active(page, target, item, timeout_ms=remaining_ms)
     actual = await active_channel_name(page)
     log.info("switch_to_channel: %r is now active (heading=%r)", channel_name, actual)
 

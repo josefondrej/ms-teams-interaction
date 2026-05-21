@@ -64,6 +64,7 @@ def _resolve_level(log_level: str, verbose: bool) -> int:
 def open_channel_cmd(
     url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
     channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select after load"),
+    no_persistent: bool = typer.Option(False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"),
     log_level: str = typer.Option("WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL", show_choices=True),
 ) -> None:
@@ -71,7 +72,7 @@ def open_channel_cmd(
     _setup_logging(_resolve_level(log_level, verbose))
 
     async def run() -> None:
-        client = TeamsClient()
+        client = TeamsClient(persistent=not no_persistent)
         await client.start()
         await client.open_channel(url, channel_name=channel)
         try:
@@ -92,6 +93,7 @@ def send(
     url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
     channel: str | None = typer.Option(None, "--channel", help="Visible channel name to select before sending"),
     text: str = typer.Option(..., "--text"),
+    no_persistent: bool = typer.Option(False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"),
     log_level: str = typer.Option("WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"),
 ) -> None:
@@ -99,7 +101,7 @@ def send(
     _setup_logging(_resolve_level(log_level, verbose))
 
     async def run() -> None:
-        client = TeamsClient()
+        client = TeamsClient(persistent=not no_persistent)
         await client.start()
         try:
             await client.send_message(url, text, channel_name=channel)
@@ -118,6 +120,7 @@ def watch(
         help="Emit currently visible messages before polling for new ones",
     ),
     interval: float = typer.Option(0.25, "--interval", help="Poll interval in seconds"),
+    no_persistent: bool = typer.Option(False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"),
     log_level: str = typer.Option("WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"),
 ) -> None:
@@ -125,7 +128,7 @@ def watch(
     _setup_logging(_resolve_level(log_level, verbose))
 
     async def run() -> None:
-        client = TeamsClient()
+        client = TeamsClient(persistent=not no_persistent)
         await client.start()
 
         async def on_message(m: ChannelMessage) -> None:
@@ -173,6 +176,7 @@ def inspect(
     url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
     samples: int = typer.Option(5, "--samples", min=1, max=20, help="How many sample DOM nodes/messages to print"),
     out: Path | None = typer.Option(None, "--out", help="Optional path to write the JSON snapshot"),
+    no_persistent: bool = typer.Option(False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"),
     log_level: str = typer.Option("WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"),
 ) -> None:
@@ -180,7 +184,7 @@ def inspect(
     _setup_logging(_resolve_level(log_level, verbose))
 
     async def run() -> None:
-        client = TeamsClient()
+        client = TeamsClient(persistent=not no_persistent)
         await client.start()
         try:
             data = await client.inspect_channel(url, channel_name=channel, max_samples=samples)
@@ -199,6 +203,7 @@ def inspect(
 def chat(
     channel: str = typer.Option(..., "--channel", help="Visible channel/chat name to open"),
     url: str | None = typer.Option(None, "--url", help="Teams URL (defaults to https://teams.microsoft.com/v2/)"),
+    no_persistent: bool = typer.Option(False, "--no-persistent", help="Launch a fresh browser (no saved profile; you will need to sign in)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging (shorthand for --log-level DEBUG)"),
     log_level: str = typer.Option("WARNING", "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL"),
 ) -> None:
@@ -206,14 +211,17 @@ def chat(
     _setup_logging(_resolve_level(log_level, verbose))
 
     async def run() -> None:
-        client = TeamsClient()
+        client = TeamsClient(persistent=not no_persistent)
         await client.start()
 
         # Open the channel on a persistent page that we keep alive
         await client.open_channel(url, channel_name=channel)
 
-        # Retrieve the page that was just opened (last page in the context)
-        page = client._context.pages[-1]
+        # Retrieve the Teams page that open_channel used (reused or newly opened)
+        page = next(
+            (p for p in reversed(client._context.pages) if not p.is_closed() and "teams.microsoft.com" in p.url),
+            client._context.pages[-1],
+        )
 
         from teams_interaction.dom import send_plain_text
 

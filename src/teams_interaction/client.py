@@ -42,6 +42,7 @@ class TeamsClient:
         browser_channel: str | None = None,
         executable_path: str | None = None,
         headless: bool = False,
+        persistent: bool = True,
     ) -> None:
         """Initialise the client with browser configuration.
 
@@ -60,6 +61,10 @@ class TeamsClient:
                 ``$TEAMS_BROWSER_EXECUTABLE``.
             headless: Launch the browser in headless mode.  Defaults to
                 ``False`` (visible window, needed for Teams SSO).
+            persistent: When ``True`` (default), use a persistent browser
+                profile so the user stays signed in between runs.  When
+                ``False``, launch a clean ephemeral browser (you will need
+                to sign in every time).
         """
         self._profile_dir = Path(
             profile_dir
@@ -72,6 +77,10 @@ class TeamsClient:
         exe = executable_path or os.environ.get("TEAMS_BROWSER_EXECUTABLE")
         self._executable_path = exe if exe else None
         self._headless = headless
+        self._persistent = persistent
+        # Non-persistent browsers start cold (no cache, no session) so give
+        # navigation and channel-switch operations more time to complete.
+        self._nav_timeout_ms: float = 15_000 if persistent else 120_000
         self._playwright: Any = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -99,20 +108,46 @@ class TeamsClient:
         return self._profile_dir / ".cdp-port"
 
     async def start(self) -> None:
-        """Launch (or reattach to) the persistent browser and create a context.
+        """Launch (or reattach to) the browser and create a context.
 
-        If a ``.cdp-port`` file exists in the profile directory, attempts to
-        connect to an already-running browser over CDP.  On failure, or when
-        no port file exists, a fresh Chromium/Edge instance is launched with
-        the profile dir and the new CDP port is written to the port file.
+        When *persistent* is ``True`` (the default), a ``user_data_dir`` is
+        used so the user stays signed in between runs.  If a ``.cdp-port``
+        file exists, attempts to connect to an already-running browser over
+        CDP first.
+
+        When *persistent* is ``False``, a plain ephemeral browser is launched
+        (no profile, no CDP reuse).  The user must sign in every time.
 
         This method is idempotent: calling it more than once is safe.
         """
         async with self._run_guard:
             if self._context:
                 return
-            self._profile_dir.mkdir(parents=True, exist_ok=True)
             self._playwright = await async_playwright().start()
+
+            if not self._persistent:
+                # ── Ephemeral (fresh) browser – no profile, no CDP reuse ─────
+                log.info("start: launching ephemeral browser (no persistent profile)")
+                launch_kwargs: dict[str, Any] = dict(
+                    headless=self._headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                if self._executable_path:
+                    launch_kwargs["executable_path"] = self._executable_path
+                    self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                else:
+                    try:
+                        launch_kwargs["channel"] = self._browser_channel
+                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                    except Exception:
+                        launch_kwargs.pop("channel", None)
+                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                self._context = await self._browser.new_context()
+                self._owns_browser = True
+                return
+
+            # ── Persistent profile path ───────────────────────────────────────
+            self._profile_dir.mkdir(parents=True, exist_ok=True)
 
             # ── Try to reuse an already-running browser instance ──────────────
             port_file = self._port_file()
@@ -145,6 +180,11 @@ class TeamsClient:
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     f"--remote-debugging-port={port}",
+                    # Prevent Edge/Chrome from opening extra tabs on launch
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-session-crashed-bubble",
+                    "--restore-last-session=false",
                 ],
             )
             if self._executable_path:
@@ -165,9 +205,9 @@ class TeamsClient:
     async def close(self) -> None:
         """Cancel background tasks and tear down the browser connection.
 
-        If this client owns the browser (i.e. it launched it), the persistent
-        context is closed (which also closes the browser) and the port file is
-        removed.  If the client only attached to an existing browser, the
+        If this client owns the browser (i.e. it launched it), the browser /
+        context is closed.  For persistent-profile browsers the port file is
+        also removed.  If the client only attached to an existing browser, the
         context and browser are left alive for other consumers.
         """
         async with self._run_guard:
@@ -178,17 +218,28 @@ class TeamsClient:
             self._tasks.clear()
             if self._context:
                 if self._owns_browser:
-                    # Closing the persistent context also closes the browser
-                    await self._context.close()
-                    self._port_file().unlink(missing_ok=True)
+                    if self._persistent:
+                        # Closing the persistent context also closes the browser
+                        await self._context.close()
+                        self._port_file().unlink(missing_ok=True)
+                    else:
+                        # Ephemeral: close context then browser separately
+                        await self._context.close()
                 # If we only attached, leave the context/browser alive for other consumers
                 self._context = None
-            if self._browser and not self._owns_browser:
-                # Detach without killing the browser
-                try:
-                    await self._browser.close()
-                except Exception:
-                    pass
+            if self._browser:
+                if not self._owns_browser:
+                    # Detach without killing the browser
+                    try:
+                        await self._browser.close()
+                    except Exception:
+                        pass
+                elif not self._persistent:
+                    # Ephemeral – we own it, kill it
+                    try:
+                        await self._browser.close()
+                    except Exception:
+                        pass
                 self._browser = None
             if self._playwright:
                 await self._playwright.stop()
@@ -208,10 +259,21 @@ class TeamsClient:
         """
         await self._require_context()
         url = self._resolve_url(channel_url)
-        page = await self._context.new_page()
-        await goto_channel(page, url)
+
+        # Reuse an existing Teams tab if one is already open, otherwise open a new one
+        page = None
+        for p in list(self._context.pages):
+            if not p.is_closed() and "teams.microsoft.com" in p.url:
+                page = p
+                log.info("open_channel: reusing existing Teams page (url=%s)", p.url)
+                break
+        if page is None:
+            page = await self._context.new_page()
+            log.info("open_channel: opening new page, url=%s", url)
+            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+
         if channel_name:
-            await switch_to_channel(page, channel_name)
+            await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
 
     async def send_message(self, channel_url: str | None, text: str, *, channel_name: str | None = None) -> None:
         """Open a channel, type *text* into the compose box, and send it.
@@ -233,9 +295,9 @@ class TeamsClient:
         url = self._resolve_url(channel_url)
         page = await self._context.new_page()
         try:
-            await goto_channel(page, url)
+            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
             if channel_name:
-                await switch_to_channel(page, channel_name)
+                await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
             await send_plain_text(page, text)
         finally:
             await page.close()
@@ -267,9 +329,9 @@ class TeamsClient:
         url = self._resolve_url(channel_url)
         page = await self._context.new_page()
         try:
-            await goto_channel(page, url)
+            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
             if channel_name:
-                await switch_to_channel(page, channel_name)
+                await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
             return await inspect_message_dom(page, max_samples=max_samples)
         finally:
             await page.close()
@@ -352,10 +414,10 @@ class TeamsClient:
             page = await self._context.new_page()
             owns_page = True
             log.info("watch: opening new page, url=%s channel=%r", url, channel_name)
-            await goto_channel(page, url)
+            await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
 
         if channel_name:
-            await switch_to_channel(page, channel_name)
+            await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
 
         seen: set[str] = set()
 
