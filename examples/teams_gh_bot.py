@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import logging
 import os
 import re
@@ -55,6 +56,21 @@ log = logging.getLogger("teams_gh_bot")
 # Regex that matches ANSI escape sequences so we can strip them from gh output.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mABCDEFGHJKSTfnsuhl]")
 
+# Number of recent messages kept as conversation context.
+_CONTEXT_WINDOW = 20
+
+# System prompt injected before the conversation history.
+_SYSTEM_PROMPT = """\
+You are a helpful assistant embedded in a Microsoft Teams channel.
+You will be shown the last few messages from the conversation for context, \
+followed by the latest message you must reply to.
+
+Rules:
+- Respond naturally and helpfully to the latest message.
+- Keep replies concise and on-topic.
+- The conversation history is for context only; only reply to the LATEST MESSAGE.
+"""
+
 
 def _strip_ansi(text: str) -> str:
     """Remove ANSI colour / cursor-control escape codes from *text*."""
@@ -66,30 +82,59 @@ def _strip_ansi(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def ask_github_copilot(user_message: str, *, extra_args: list[str] | None = None) -> str:
-    """Send *user_message* to the GitHub Copilot CLI agent and return its reply.
+async def ask_github_copilot(
+    user_message: str,
+    *,
+    history: list[tuple[str, str]] | None = None,
+    extra_args: list[str] | None = None,
+) -> str:
+    """Send *user_message* (with optional conversation history) to the GitHub
+    Copilot CLI agent and return its reply.
 
-    Runs::
+    The prompt is structured as::
 
-        copilot -p "<user_message>" -s --allow-all-tools [extra_args…]
+        <system instructions>
 
-    - ``-p`` / ``--prompt``      — non-interactive prompt
-    - ``-s`` / ``--silent``      — output only the agent response (no stats)
-    - ``--allow-all-tools``      — required for fully non-interactive operation
+        [Conversation history]
+        <author>: <text>
+        …
+
+        [Latest message]
+        <author>: <text>
+
+        ---
+        Respond to the latest message, or output exactly "WAITING FOR RESPONSE"
+        if no reply is needed.
 
     Args:
-        user_message: The text received from Teams.
-        extra_args: Optional extra flags appended to the command
-            (e.g. ``["--model", "gpt-4o"]``).
+        user_message: The text received from Teams (formatted as ``"author: text"``).
+        history: Optional list of ``(author, text)`` tuples representing the
+            recent conversation context (oldest first, excluding the latest).
+        extra_args: Optional extra flags appended to the command.
 
     Returns:
         The plain-text response string, or a human-readable error message.
     """
-    cmd = ["copilot", "-p", user_message, "-s", "--allow-all-tools"]
+    # Build the enriched prompt.
+    parts: list[str] = [_SYSTEM_PROMPT, ""]
+
+    if history:
+        parts.append("[Conversation history]")
+        for author, text in history:
+            parts.append(f"{author or 'Unknown'}: {text}")
+        parts.append("")
+
+    parts.append("[Latest message]")
+    parts.append(user_message)
+    parts.append("")
+
+    full_prompt = "\n".join(parts)
+
+    cmd = ["copilot", "-p", full_prompt, "-s", "--allow-all-tools"]
     if extra_args:
         cmd.extend(extra_args)
 
-    log.debug("copilot command: %s", " ".join(cmd))
+    log.debug("copilot command (prompt length=%d)", len(full_prompt))
 
     env = {**os.environ, "NO_COLOR": "1"}
 
@@ -133,9 +178,10 @@ class TeamsGhBot:
     background sender task, so the poll loop is never blocked while a reply is
     being composed or sent.
 
-    Each message is forwarded as::
-
-        copilot -p "<text>" -s --allow-all-tools [extra_args…]
+    Each message is forwarded with a rolling window of the last
+    *context_window* messages so the LLM can decide whether a reply is
+    warranted.  If the LLM responds with exactly ``"WAITING FOR RESPONSE"``,
+    no message is sent.
 
     Args:
         channel_name: Visible Teams channel or DM contact name.
@@ -147,6 +193,7 @@ class TeamsGhBot:
         ignore_self: When ``True`` (default), skip messages whose author matches
             *bot_author* to prevent the bot from responding to its own replies.
         bot_author: Display name that appears when *this* account sends a message.
+        context_window: Number of recent messages to include as context (default 20).
     """
 
     def __init__(
@@ -159,6 +206,7 @@ class TeamsGhBot:
         bot_prefix: str = "🤖 ",
         ignore_self: bool = True,
         bot_author: str = "",
+        context_window: int = _CONTEXT_WINDOW,
     ) -> None:
         self.channel_name = channel_name
         self.channel_url = channel_url
@@ -167,19 +215,21 @@ class TeamsGhBot:
         self.bot_prefix = bot_prefix
         self.ignore_self = ignore_self
         self.bot_author = bot_author.strip().lower()
+        self.context_window = context_window
 
         self._client = TeamsClient()
-        # Queue of (author, text) tuples for the background sender task.
-        self._reply_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        # Queue of (author, text, history_snapshot) tuples for the background sender task.
+        self._reply_queue: asyncio.Queue[tuple[str, str, list[tuple[str, str]]]] = asyncio.Queue()
+        # Rolling buffer of (author, text) for the last *context_window* messages.
+        self._history: collections.deque[tuple[str, str]] = collections.deque(maxlen=context_window)
 
     # ------------------------------------------------------------------
 
     async def on_message(self, msg: ChannelMessage) -> None:
         """Callback invoked by TeamsClient for every new channel message.
 
-        Filters out bot-authored messages and enqueues the text for the
-        background sender task — does NOT await any I/O so the poll loop
-        is never blocked.
+        Filters out bot-authored messages, updates the conversation history
+        buffer, and enqueues the message for the background sender task.
 
         Args:
             msg: The newly detected Teams message.
@@ -195,6 +245,8 @@ class TeamsGhBot:
         # of how the author name appears in the DOM.
         if text.startswith(self.bot_prefix.strip()):
             log.debug("Skipping own reply (starts with bot prefix)")
+            # Still record the bot's own reply in history so the LLM has context.
+            self._history.append((author or "Bot", text))
             return
 
         # Secondary filter: skip by explicit author name when --bot-author is set.
@@ -203,8 +255,14 @@ class TeamsGhBot:
             return
 
         print(f"\n📨  {author or '(unknown)'}: {text[:200]}", flush=True)
+
+        # Snapshot history *before* appending the new message so the sender
+        # gets [context] + [latest] as separate arguments.
+        history_snapshot = list(self._history)
+        self._history.append((author or "Unknown", text))
+
         # Non-blocking enqueue — the background sender task will pick this up.
-        await self._reply_queue.put((author, text))
+        await self._reply_queue.put((author, text, history_snapshot))
 
     # ------------------------------------------------------------------
 
@@ -212,17 +270,28 @@ class TeamsGhBot:
         """Background task: drain the reply queue one item at a time.
 
         For each queued message:
-        1. Runs ``copilot -p "<text>" -s --allow-all-tools`` to get a response.
-        2. Sends the response back to Teams via the reusable send page
-           (no new browser window/tab is opened after the first call).
+        1. Builds a prompt with the conversation history context.
+        2. Runs ``copilot -p "<prompt>" -s --allow-all-tools`` to get a response.
+        3. If the response is exactly ``"WAITING FOR RESPONSE"``, skips sending.
+        4. Otherwise sends the response back to Teams.
 
         Runs until cancelled (e.g. on Ctrl+C).
         """
         while True:
-            author, text = await self._reply_queue.get()
+            author, text, history = await self._reply_queue.get()
             try:
-                print("   ↳ copilot -p … -s --allow-all-tools", flush=True)
-                reply = await ask_github_copilot(text, extra_args=self.extra_args)
+                ctx_count = len(history)
+                print(
+                    f"   ↳ asking copilot (context: {ctx_count} message(s)) …",
+                    flush=True,
+                )
+                latest_message = f"{author or 'Unknown'}: {text}"
+                reply = await ask_github_copilot(
+                    latest_message,
+                    history=history,
+                    extra_args=self.extra_args,
+                )
+
 
                 wrapped = "\n".join(
                     textwrap.fill(line, width=120) if len(line) > 120 else line for line in reply.splitlines()
@@ -257,6 +326,7 @@ class TeamsGhBot:
             f"    Channel  : {self.channel_name}\n"
             f"    Command  : {full_cmd}\n"
             f"    Polling  : every {self.poll_interval} s\n"
+            f"    Context  : last {self.context_window} messages\n"
             f"\nWaiting for messages … (Ctrl+C to stop)\n",
             flush=True,
         )
@@ -356,6 +426,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable self-message filtering (may cause reply loops)",
     )
     parser.add_argument(
+        "--context-window",
+        type=int,
+        default=_CONTEXT_WINDOW,
+        dest="context_window",
+        metavar="N",
+        help=f"Number of recent messages sent as context to the LLM (default: {_CONTEXT_WINDOW})",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -401,6 +479,7 @@ def main(argv: list[str] | None = None) -> None:
         bot_prefix=args.bot_prefix,
         ignore_self=args.ignore_self,
         bot_author=args.bot_author,
+        context_window=args.context_window,
     )
 
     asyncio.run(bot.run())
