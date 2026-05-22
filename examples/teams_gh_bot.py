@@ -292,7 +292,6 @@ class TeamsGhBot:
                     extra_args=self.extra_args,
                 )
 
-
                 wrapped = "\n".join(
                     textwrap.fill(line, width=120) if len(line) > 120 else line for line in reply.splitlines()
                 )

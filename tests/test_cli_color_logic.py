@@ -1,5 +1,7 @@
-from teams_interaction.cli import _get_color_for_author, _AUTHOR_COLORS
 import typer
+
+from teams_interaction.cli import _AUTHOR_COLORS, _get_color_for_author
+
 
 def test_get_color_for_author_is_consistent():
     author = "Alice"
@@ -8,12 +10,14 @@ def test_get_color_for_author_is_consistent():
     assert color1 == color2
     assert color1 in _AUTHOR_COLORS
 
+
 def test_different_authors_get_different_colors():
-    # Note: with only 12 colors, there might be collisions, 
+    # Note: with only 12 colors, there might be collisions,
     # but for these names they should be different.
     color_alice = _get_color_for_author("Alice")
     color_bob = _get_color_for_author("Bob")
     assert color_alice != color_bob
+
 
 def test_empty_author_gets_white():
     assert _get_color_for_author("") == typer.colors.WHITE
