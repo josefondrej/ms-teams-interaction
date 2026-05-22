@@ -144,7 +144,10 @@ class TeamsClient:
         log.info("start: launching ephemeral browser (no persistent profile)")
         launch_kwargs: dict[str, Any] = dict(
             headless=self._headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+            ],
         )
         if self._executable_path:
             launch_kwargs["executable_path"] = self._executable_path
@@ -156,7 +159,7 @@ class TeamsClient:
             except Exception:
                 launch_kwargs.pop("channel", None)
                 self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-        self._context = await self._browser.new_context()
+        self._context = await self._browser.new_context(no_viewport=True)
         self._owns_browser = True
 
     async def _start_persistent(self) -> None:
@@ -175,6 +178,7 @@ class TeamsClient:
             launch_args: dict[str, Any] = dict(
                 user_data_dir=str(profile_dir),
                 headless=self._headless,
+                no_viewport=True,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     f"--remote-debugging-port={port}",
@@ -182,6 +186,7 @@ class TeamsClient:
                     "--no-default-browser-check",
                     "--disable-session-crashed-bubble",
                     "--restore-last-session=false",
+                    "--start-maximized",
                 ],
             )
             try:
@@ -318,7 +323,7 @@ class TeamsClient:
 
         If the cached send page is still open and already on a Teams URL, it is
         returned as-is (no extra navigation).  If it has been closed or was
-        never created, a fresh page is opened and navigated to *url*.
+        never created, a fresh page is acquired via :meth:`_acquire_page`.
 
         Args:
             url: Teams URL to navigate to when a new page must be created.
@@ -336,9 +341,9 @@ class TeamsClient:
             await goto_channel(self._send_page, url, timeout_ms=self._nav_timeout_ms)
             return self._send_page
 
-        log.info("_get_or_create_send_page: creating persistent send page")
-        page = await self._new_page()
-        await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+        log.info("_get_or_create_send_page: acquiring persistent send page")
+        owns_page_out = [False]
+        page = await self._acquire_page(url, owns_page_out=owns_page_out)
         self._send_page = page
         return page
 
@@ -367,14 +372,16 @@ class TeamsClient:
         """
         await self._require_context()
         url = self._resolve_url(channel_url)
-        page = await self._new_page()
+        owns_page_out = [False]
+        page = await self._acquire_page(url, owns_page_out=owns_page_out)
         try:
             await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
             if channel_name:
                 await switch_to_channel(page, channel_name, timeout_ms=self._nav_timeout_ms)
             return await inspect_message_dom(page, max_samples=max_samples)
         finally:
-            await page.close()
+            if owns_page_out[0]:
+                await page.close()
 
     def watch_channel(
         self,
@@ -546,7 +553,19 @@ class TeamsClient:
         if not self._context:
             return
 
-        all_pages = [page for page in self._context.pages if not page.is_closed()]
+        # Give the browser a moment to restore tabs from a previous session.
+        # Playwright's launch_persistent_context returns as soon as the browser
+        # is up, but restored tabs might appear shortly after.
+        for _ in range(10):
+            all_pages = [page for page in self._context.pages if not page.is_closed()]
+            # If we see multiple pages, or if we see a Teams page, we probably have
+            # what we need to start cleaning.
+            if len(all_pages) > 1 or any("teams.microsoft.com" in p.url for p in all_pages):
+                break
+            await asyncio.sleep(0.2)
+        else:
+            all_pages = [page for page in self._context.pages if not page.is_closed()]
+
         if not all_pages:
             return
 
@@ -572,6 +591,7 @@ class TeamsClient:
                 continue
             try:
                 await page.close()
+                self._my_pages.discard(page)
                 closed += 1
                 log.debug("_cleanup_startup_tabs: closed tab url=%r", page.url)
             except Exception as exc:
@@ -593,6 +613,9 @@ class TeamsClient:
            *url* instead of spawning a second blank tab alongside it.
         3. Open a brand-new page and navigate it to *url*.
 
+        In all cases, other open tabs in the context are closed to enforce
+        the "one client = one tab" policy.
+
         *owns_page_out* is a single-element list used as an out-parameter; it
         is set to ``[True]`` when the caller should close the page after use,
         and ``[False]`` when an already-open Teams page was reused.
@@ -603,24 +626,48 @@ class TeamsClient:
         # from another process that shares the same browser context via CDP.
         my_pages = [page for page in pages if page in self._my_pages]
 
+        target_page: Any = None
         for page in my_pages:
             if "teams.microsoft.com" in page.url:
                 log.info("_acquire_page: reusing existing Teams page (url=%s)", page.url)
                 owns_page_out[0] = False
-                return page
+                target_page = page
+                break
 
-        for page in my_pages:
-            if page.url in self._BLANK_URLS:
-                log.info("_acquire_page: reusing blank tab, navigating to %s", url)
-                owns_page_out[0] = True
-                await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
-                return page
+        if not target_page:
+            for page in my_pages:
+                if page.url in self._BLANK_URLS:
+                    log.info("_acquire_page: reusing blank tab, navigating to %s", url)
+                    owns_page_out[0] = True
+                    await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
+                    target_page = page
+                    break
 
-        log.info("_acquire_page: opening new page, url=%s", url)
-        page = await self._new_page()
-        owns_page_out[0] = True
-        await goto_channel(page, url, timeout_ms=self._nav_timeout_ms)
-        return page
+        if not target_page and my_pages:
+            # Fallback: reuse ANY page we own, even if not blank/Teams, to
+            # enforce the one-tab policy without opening a new tab.
+            target_page = my_pages[0]
+            log.info("_acquire_page: reusing existing page (url=%s), navigating to %s", target_page.url, url)
+            owns_page_out[0] = True
+            await goto_channel(target_page, url, timeout_ms=self._nav_timeout_ms)
+
+        if not target_page:
+            log.info("_acquire_page: opening new page, url=%s", url)
+            target_page = await self._new_page()
+            owns_page_out[0] = True
+            await goto_channel(target_page, url, timeout_ms=self._nav_timeout_ms)
+
+        # Enforce single tab: close everything else.
+        for page in pages:
+            if page is not target_page:
+                try:
+                    await page.close()
+                    self._my_pages.discard(page)
+                    log.debug("_acquire_page: closed extra tab url=%r", page.url)
+                except Exception:
+                    pass
+
+        return target_page
 
     async def _new_page(self) -> Any:
         """Open a new browser tab, with a ``window.open`` fallback.
