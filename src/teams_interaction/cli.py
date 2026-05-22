@@ -12,6 +12,7 @@ Exposes five Typer commands:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sys
@@ -27,6 +28,31 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 log = logging.getLogger(__name__)
 
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+_AUTHOR_COLORS = [
+    typer.colors.CYAN,
+    typer.colors.MAGENTA,
+    typer.colors.YELLOW,
+    typer.colors.GREEN,
+    typer.colors.RED,
+    typer.colors.BLUE,
+    typer.colors.BRIGHT_CYAN,
+    typer.colors.BRIGHT_MAGENTA,
+    typer.colors.BRIGHT_YELLOW,
+    typer.colors.BRIGHT_GREEN,
+    typer.colors.BRIGHT_RED,
+    typer.colors.BRIGHT_BLUE,
+]
+
+
+def _get_color_for_author(author: str) -> str:
+    """Return a consistent Typer color for a given author name."""
+    if not author:
+        return typer.colors.WHITE
+    # Use a stable hash to keep colors consistent across runs
+    h = hashlib.md5(author.encode("utf-8")).hexdigest()
+    idx = int(h, 16) % len(_AUTHOR_COLORS)
+    return _AUTHOR_COLORS[idx]
 
 
 def _setup_logging(level: int = logging.WARNING) -> None:
@@ -153,7 +179,7 @@ def watch(
             who = message.author or "?"
             ts = datetime.now().strftime("%H:%M:%S")
             body = message.text.replace("\n", " ").strip()
-            author_styled = typer.style(who, fg=typer.colors.CYAN, bold=True)
+            author_styled = typer.style(who, fg=_get_color_for_author(who), bold=True)
             ts_styled = typer.style(f"[{ts}]", fg=typer.colors.BRIGHT_BLACK)
             typer.echo(f"{ts_styled} {author_styled}: {body}")
 
